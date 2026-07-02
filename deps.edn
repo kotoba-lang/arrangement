@@ -1,7 +1,7 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/prolly-tree {:git/sha "b23cda19c72fcf1b55487b82083200429fa91c1a"}
-        io.github.kotoba-lang/multiformats {:git/sha "11736e9772091699e285284eac3cd80066dded9a"}
-        io.github.kotoba-lang/dag-cbor {:git/sha "720e868396a565066f9938f39d3150cde00bfb4a"}}
+ :deps {io.github.kotoba-lang/prolly-tree {:git/sha "6913fa1efe993c50e3ca2735acc731a5432a2a92"}
+        io.github.kotoba-lang/multiformats {:git/sha "eec3ee85c458ea830be94518b9a42f4a8f1aee40"}
+        io.github.kotoba-lang/dag-cbor {:git/sha "a42167c5ff4a552015e3b640ce580b495942ddb8"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
