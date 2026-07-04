@@ -1,15 +1,23 @@
-(ns quad-store.core
-  "In-memory 4-index Quad Arrangement -- `spo`/`pso`/`pos`/`ocp`, the same
-  naming as the deleted kotoba-query Rust crate's EAVT/AEVT/AVET/VAET
-  indices -- plus CID-addressed commit snapshotting via `prolly-tree.core`.
+(ns arrangement.core
+  "The in-memory, 4-covering-index Arrangement -- Datomic's own term for
+  this exact structure (`spo`/`pso`/`pos`/`ocp` here, EAVT/AEVT/AVET/VAET
+  in Datomic's vocabulary) -- plus CID-addressed commit snapshotting via
+  `prolly-tree.core`. Repo formerly `quad-store` (renamed: it stores
+  triples `{:s :p :o}`, not RDF quads -- `Arrangement` names the actual
+  structure instead of overloading `quad`, and aligns this whole substrate
+  with Datomic terminology per the design this org tracks kotoba : kotobase
+  = Clojure : Datomic against, ADR-2607032500). `arrangement.query` (this
+  same repo, formerly the standalone `kqe` repo) is the pattern-routing
+  query layer over the indices below.
 
-  A quad is `{:s subject :p predicate :o object}`. s/p/o are still treated
-  as opaque values for indexing purposes (general typed-value support --
-  int/bytes/bool beyond string and `ipld.core/Link` -- remains a follow-up),
-  but an `ipld.core/Link` value is now recognized and preserved end to end:
-  through the hot db, through a commit snapshot's index-root (`index-root`
-  below), and back out again on a cold read (see `kotoba-lang/kotobase-
-  engine`'s `cold-datoms`/`hydrate-db`, which call `edn->link` on read).
+  A triple is `{:s subject :p predicate :o object}`. s/p/o are still
+  treated as opaque values for indexing purposes (general typed-value
+  support -- int/bytes/bool beyond string and `ipld.core/Link` -- remains a
+  follow-up), but an `ipld.core/Link` value is now recognized and preserved
+  end to end: through the hot db, through a commit snapshot's index-root
+  (`index-root` below), and back out again on a cold read (see
+  `kotoba-lang/kotobase-peer`'s `cold-datoms`/`hydrate-db`, which call
+  `edn->link` on read).
 
   `:o` values that are references to other entities are additionally
   indexed in `ocp` for reverse-reference lookup when `ref?` (default:

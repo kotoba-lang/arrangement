@@ -1,8 +1,8 @@
-(ns quad-store.core-test
+(ns arrangement.core-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
-            [quad-store.core :as qs]
+            [arrangement.core :as qs]
             [multiformats.core :as mf]
             [prolly-tree.core :as pt]
             [ipld.core :as ipld]))
