@@ -13,7 +13,7 @@ terminology throughout, per `kotoba : kotobase = Clojure : Datomic`,
 ADR-2607032500) and `kqe` (Kotoba Query Engine, merged in here — a pure
 routing function over these indices with no storage of its own doesn't
 need its own repo). See `90-docs/adr/2607010930-clj-wgsl-migration.md`
-Phase 6 for the original landing, and ADR-2607050600 for the rename/merge.
+Phase 6 for the original landing, and ADR-2607050700 for the rename/merge.
 
 A triple is `{:s subject :p predicate :o object}`. For this landing s/p/o
 are opaque strings — dag-cbor round-trips strings exactly but not e.g.
