@@ -105,11 +105,12 @@
     (pt/build-tree put! entries)))
 
 (def current-schema-version
-  "The `\"schema-version\"` tag `commit!` stamps onto every persisted commit
-  node (ADR-2607050500, \"Schema evolution\"). Bump this -- and give
-  `kotobase-engine`/callers a migration path keyed on the old value -- the
-  day the 4-index shape below changes incompatibly. Purely a marker today;
-  nothing reads or enforces it yet."
+  "The current `\"schema-version\"` value for this index shape
+  (ADR-2607050500, \"Schema evolution\"). Not a hidden default -- `commit!`
+  requires the caller to pass a version explicitly (see below); this is
+  just the value to pass when you have no other one in mind. Bump this --
+  and give callers a migration path keyed on the old value -- the day the
+  4-index shape changes incompatibly."
   1)
 
 (defn commit!
@@ -119,13 +120,17 @@
   every root and `prev` is a REAL tag-42 IPLD link via `kotoba-lang/ipld`
   -- an empty index snapshots as null), and return the commit CID string.
   `prev` is the previous commit CID, or nil for the first commit.
-  Content-addressed: committing the same `db` + `prev` twice returns the
-  same CID."
-  [put! db prev]
+
+  `schema-version` is REQUIRED (ADR-2607050500: schema evolution is a
+  caller-declared choice, not a silently-assumed default) -- pass
+  `current-schema-version` if you have no other version in mind, but state
+  it. Content-addressed: committing the same `db` + `prev` + `schema-
+  version` twice returns the same CID."
+  [put! db prev schema-version]
   (let [->link #(some-> % ipld/link)          ; empty index -> nil root -> null
         roots {"spo" (->link (index-root put! (:spo db)))
                "pso" (->link (index-root put! (:pso db)))
                "pos" (->link (index-root put! (:pos db)))
                "ocp" (->link (index-root put! (:ocp db)))}]
-    (ipld/put-node! put! {"schema-version" current-schema-version
+    (ipld/put-node! put! {"schema-version" schema-version
                           "index-roots" roots "prev" (->link prev)})))

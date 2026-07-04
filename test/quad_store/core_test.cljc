@@ -66,7 +66,7 @@
 (deftest commit-preserves-link-values-through-index-root
   (let [{:keys [put! get-fn]} (mem-store)
         db (qs/assert-quad (qs/empty-db) {:s "alice" :p "knows" :o bafy-link})
-        cid (qs/commit! put! db nil)
+        cid (qs/commit! put! db nil qs/current-schema-version)
         node (ipld/decode (get-fn cid))
         spo-root (ipld/link-cid (get-in node ["index-roots" "spo"]))
         [[leaf-key _]] (pt/scan-prefix get-fn spo-root "")
@@ -78,23 +78,25 @@
         db (-> (qs/empty-db)
                (qs/assert-quad {:s "alice" :p "role" :o "admin"})
                (qs/assert-quad {:s "bob" :p "role" :o "user"}))
-        cid1 (qs/commit! put! db nil)
-        cid2 (qs/commit! put! db nil)]
+        cid1 (qs/commit! put! db nil qs/current-schema-version)
+        cid2 (qs/commit! put! db nil qs/current-schema-version)]
     (testing "same db + prev -> same commit CID"
       (is (= cid1 cid2)))
     (testing "different prev -> different commit CID"
-      (is (not= cid1 (qs/commit! put! db (mf/kotoba-cid "some-other-prev")))))
+      (is (not= cid1 (qs/commit! put! db (mf/kotoba-cid "some-other-prev") qs/current-schema-version))))
     (testing "different db -> different commit CID"
       (let [db2 (qs/assert-quad db {:s "carol" :p "role" :o "user"})]
-        (is (not= cid1 (qs/commit! put! db2 nil)))))
+        (is (not= cid1 (qs/commit! put! db2 nil qs/current-schema-version)))))
+    (testing "different schema-version -> different commit CID"
+      (is (not= cid1 (qs/commit! put! db nil 2))))
     (is (contains? @store cid1))))
 
 (deftest commit-block-is-real-ipld
   (let [{:keys [put! get-fn]} (mem-store)
         db (-> (qs/empty-db)
                (qs/assert-quad {:s "alice" :p "role" :o "admin"}))
-        prev (qs/commit! put! (qs/empty-db) nil)
-        cid (qs/commit! put! db prev)
+        prev (qs/commit! put! (qs/empty-db) nil qs/current-schema-version)
+        cid (qs/commit! put! db prev qs/current-schema-version)
         node (ipld/decode (get-fn cid))]
     (testing "index roots and prev are tag-42 links (nil for empty indexes)"
       (is (ipld/link? (get-in node ["index-roots" "spo"])))
@@ -109,10 +111,13 @@
         (is (nil? (get-in n0 ["index-roots" "spo"])))
         (is (nil? (get n0 "prev")))))))
 
-(deftest commit-node-carries-schema-version
-  ;; ADR-2607050500 "Schema evolution": a marker for future incompatible
-  ;; index-shape changes to key a migration off of. Purely additive.
+(deftest commit-schema-version-is-required-and-caller-declared
+  ;; ADR-2607050500 "Schema evolution": the caller states the version being
+  ;; written -- no silent default, and a different version really does
+  ;; produce a different persisted node.
   (let [{:keys [put! get-fn]} (mem-store)
-        cid (qs/commit! put! (qs/empty-db) nil)
+        cid (qs/commit! put! (qs/empty-db) nil qs/current-schema-version)
         node (ipld/decode (get-fn cid))]
-    (is (= qs/current-schema-version (get node "schema-version")))))
+    (is (= qs/current-schema-version (get node "schema-version")))
+    (is (= 2 (get (ipld/decode (get-fn (qs/commit! put! (qs/empty-db) nil 2)))
+                  "schema-version")))))
