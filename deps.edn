@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/prolly-tree {:git/sha "ef43a9dfd0c483d62af9ace273d579c41b391511"}
+ :deps {io.github.kotoba-lang/prolly-tree {:git/sha "2a5ba48a2eb11cc73b549ee75f5c1b71cc223566"}
         io.github.kotoba-lang/io-ipld {:git/sha "1e715d1c718376313a12b0e5d4f62eb0cb886aaa"}}
  :aliases
  {:test {:extra-paths ["test"]
