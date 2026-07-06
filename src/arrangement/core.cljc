@@ -99,6 +99,29 @@
         (ipld/link (second v))
         v))
 
+;; ── index-root: JVM (sync) / cljs (async, ADR-2607051000 Worker addendum) ──
+;; `blind-fn`/`encrypt-fn` carry a DIFFERENT contract per platform, by design:
+;; JVM `javax.crypto` is synchronous (`(blind-fn x) -> string`, `(encrypt-fn
+;; bytes) -> bytes`, called directly). The Worker's Web Crypto
+;; (`crypto.subtle.sign`/`.encrypt`) is Promise-based — there is no
+;; synchronous AEAD/HMAC primitive in that runtime — so the cljs contract is
+;; `(blind-fn x) -> js/Promise<string>`, `(encrypt-fn bytes) -> js/Promise<
+;; bytes>`, and `index-root`/`commit!` become Promise-returning too. This
+;; does NOT touch `put!`/`get-fn` (still synchronous on both platforms,
+;; unchanged from `prolly-tree.core`/`ipld.core`'s existing contract) — the
+;; async boundary is isolated to the crypto step alone, resolved BEFORE the
+;; (still-synchronous) tree is built. The JVM body below is byte-identical to
+;; the one ADR-2607051000's implementation PR merged; only a cljs sibling is
+;; new."
+#?(:cljs
+   (defn- pmap-async
+     "cljs only: map `f` (returns a `js/Promise`) over `coll` concurrently,
+     return one `js/Promise` of the resolved results, order-preserved --
+     `js/Promise.all`, cljs-idiomatic (`vec`-in, `vec`-out)."
+     [f coll]
+     (-> (js/Promise.all (into-array (map f coll)))
+         (.then (fn [arr] (vec arr))))))
+
 (defn- index-root
   "Flatten one index map into sorted `[key val]` prolly-tree entries and
   build a tree from it (ADR-2607051000, ciphertext-over-CID persistence:
@@ -123,15 +146,30 @@
 
   `blind-fn`/`encrypt-fn` are REQUIRED (no default — matching this
   codebase's no-silent-default stance, ADR-2607050700, same as
-  `schema-version` below): `(blind-fn link-edn-component) -> string`,
-  `(encrypt-fn bytes) -> bytes`."
+  `schema-version` below): synchronous on JVM (`(blind-fn link-edn-
+  component) -> string`, `(encrypt-fn bytes) -> bytes`); Promise-returning
+  on cljs (see the platform-contract note above). Returns the root CID
+  directly on JVM, a `js/Promise` of it on cljs."
   [put! m blind-fn encrypt-fn]
-  (let [entries (sort-by first
-                         (for [[k1 m2] m [k2 vs] m2 v vs
-                               :let [k1' (link->edn k1) k2' (link->edn k2) v' (link->edn v)]]
-                           [(pr-str [(blind-fn k1') (blind-fn k2') (blind-fn v')])
-                            (encrypt-fn (ipld/encode [k1' k2' v']))]))]
-    (pt/build-tree put! entries)))
+  #?(:clj
+     (let [entries (sort-by first
+                            (for [[k1 m2] m [k2 vs] m2 v vs
+                                  :let [k1' (link->edn k1) k2' (link->edn k2) v' (link->edn v)]]
+                              [(pr-str [(blind-fn k1') (blind-fn k2') (blind-fn v')])
+                               (encrypt-fn (ipld/encode [k1' k2' v']))]))]
+       (pt/build-tree put! entries))
+     :cljs
+     (let [triples (vec (for [[k1 m2] m [k2 vs] m2 v vs
+                              :let [k1' (link->edn k1) k2' (link->edn k2) v' (link->edn v)]]
+                          [k1' k2' v']))]
+       (-> (pmap-async
+            (fn [[k1' k2' v']]
+              (-> (pmap-async blind-fn [k1' k2' v'])
+                  (.then (fn [blinded]
+                           (-> (encrypt-fn (ipld/encode [k1' k2' v']))
+                               (.then (fn [ct] [(pr-str blinded) ct])))))))
+            triples)
+           (.then (fn [entries] (pt/build-tree put! (vec (sort-by first entries)))))))))
 
 (def current-schema-version
   "The current `\"schema-version\"` value for this index shape
@@ -158,12 +196,23 @@
 
   `blind-fn`/`encrypt-fn` are REQUIRED (ADR-2607051000, accepted
   2026-07-06) and threaded unchanged to `index-root` for all 4 indices —
-  see `index-root`'s docstring for their contract."
+  see `index-root`'s docstring for their contract, including the
+  synchronous-JVM/Promise-cljs platform split. Returns the commit CID
+  directly on JVM, a `js/Promise` of it on cljs."
   [put! db prev schema-version blind-fn encrypt-fn]
-  (let [->link #(some-> % ipld/link)          ; empty index -> nil root -> null
-        roots {"spo" (->link (index-root put! (:spo db) blind-fn encrypt-fn))
-               "pso" (->link (index-root put! (:pso db) blind-fn encrypt-fn))
-               "pos" (->link (index-root put! (:pos db) blind-fn encrypt-fn))
-               "ocp" (->link (index-root put! (:ocp db) blind-fn encrypt-fn))}]
-    (ipld/put-node! put! {"schema-version" schema-version
-                          "index-roots" roots "prev" (->link prev)})))
+  (let [->link #(some-> % ipld/link)]          ; empty index -> nil root -> null
+    #?(:clj
+       (let [roots {"spo" (->link (index-root put! (:spo db) blind-fn encrypt-fn))
+                    "pso" (->link (index-root put! (:pso db) blind-fn encrypt-fn))
+                    "pos" (->link (index-root put! (:pos db) blind-fn encrypt-fn))
+                    "ocp" (->link (index-root put! (:ocp db) blind-fn encrypt-fn))}]
+         (ipld/put-node! put! {"schema-version" schema-version
+                               "index-roots" roots "prev" (->link prev)}))
+       :cljs
+       (-> (pmap-async (fn [k] (index-root put! (get db k) blind-fn encrypt-fn))
+                       [:spo :pso :pos :ocp])
+           (.then (fn [[spo pso pos ocp]]
+                    (ipld/put-node! put! {"schema-version" schema-version
+                                          "index-roots" {"spo" (->link spo) "pso" (->link pso)
+                                                         "pos" (->link pos) "ocp" (->link ocp)}
+                                          "prev" (->link prev)})))))))
