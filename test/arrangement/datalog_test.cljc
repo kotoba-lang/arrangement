@@ -185,3 +185,104 @@
         no-bob (fn [{:keys [s]}] (not= "bob" s))]
     (is (= #{[2]}
            (dl/q db {:find '[(count ?s)] :where '[[?s "name" _]]} no-bob)))))
+
+;; ── recursive rules (ADR-2607061200 Stage 3/4) ──────────────────────────────
+
+(defn- chain-db []
+  (-> (arr/empty-db)
+      (arr/assert-quad {:s "alice" :p "parent" :o "bob"})
+      (arr/assert-quad {:s "bob" :p "parent" :o "carol"})
+      (arr/assert-quad {:s "carol" :p "parent" :o "dave"})))
+
+(def ^:private ancestor-rules
+  '[[(ancestor ?x ?y) [?x "parent" ?y]]
+    [(ancestor ?x ?y) [?x "parent" ?z] (ancestor ?z ?y)]])
+
+(deftest transitive-closure-via-recursive-rule
+  (let [db (chain-db)]
+    (is (= #{["alice" "bob"] ["alice" "carol"] ["alice" "dave"]
+             ["bob" "carol"] ["bob" "dave"]
+             ["carol" "dave"]}
+           (dl/q db {:find '[?x ?y] :where '[(ancestor ?x ?y)] :rules ancestor-rules} everything)))))
+
+(deftest rule-invocation-can-bind-args-in-either-direction
+  (let [db (chain-db)]
+    (testing "first arg bound (find descendants), second arg bound (find ancestors)"
+      (is (= #{["bob"] ["carol"] ["dave"]}
+             (dl/q db {:find '[?y] :where '[(ancestor "alice" ?y)] :rules ancestor-rules} everything)))
+      (is (= #{["alice"] ["bob"] ["carol"]}
+             (dl/q db {:find '[?x] :where '[(ancestor ?x "dave")] :rules ancestor-rules} everything))))))
+
+(deftest rule-without-recursion-behaves-like-a-named-join
+  (let [db (chain-db)]
+    (is (= #{["bob"]}
+           (dl/q db {:find '[?y]
+                     :where '[(parent-of "alice" ?y)]
+                     :rules '[[(parent-of ?x ?y) [?x "parent" ?y]]]}
+                 everything)))))
+
+(deftest mutual-recursion-across-two-rules
+  (let [db (-> (arr/empty-db)
+               (arr/assert-quad {:s "a" :p "red" :o "b"})
+               (arr/assert-quad {:s "b" :p "blue" :o "c"})
+               (arr/assert-quad {:s "c" :p "red" :o "d"})
+               (arr/assert-quad {:s "d" :p "blue" :o "e"}))
+        rules '[[(reach-red ?x ?y) [?x "red" ?y]]
+                [(reach-red ?x ?y) [?x "red" ?z] (reach-blue ?z ?y)]
+                [(reach-blue ?x ?y) [?x "blue" ?y]]
+                [(reach-blue ?x ?y) [?x "blue" ?z] (reach-red ?z ?y)]]]
+    (is (= #{["b"] ["c"] ["d"] ["e"]}
+           (dl/q db {:find '[?y] :where '[(reach-red "a" ?y)] :rules rules} everything)))))
+
+(deftest recursive-rule-respects-visible-through-the-fixpoint
+  (let [db (chain-db)
+        hide-bob-carol (fn [{:keys [s p o]}] (not (and (= s "bob") (= p "parent") (= o "carol"))))]
+    (testing "without redaction alice reaches carol/dave too; with bob->carol hidden, the fixpoint can't derive past bob"
+      (is (= #{["bob"] ["carol"] ["dave"]}
+             (dl/q db {:find '[?y] :where '[(ancestor "alice" ?y)] :rules ancestor-rules} everything)))
+      (is (= #{["bob"]}
+             (dl/q db {:find '[?y] :where '[(ancestor "alice" ?y)] :rules ancestor-rules} hide-bob-carol))
+          "the hidden edge is invisible to every rule-body clause too, not just the top-level :where"))))
+
+(deftest unknown-rule-invocation-throws
+  (let [db (chain-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"unknown rule"
+                           (dl/q db {:find '[?y] :where '[(nope "alice" ?y)]} everything)))))
+
+(deftest rule-invoked-with-wrong-arity-throws
+  (let [db (chain-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"wrong number of arguments"
+                           (dl/q db {:find '[?y]
+                                     :where '[(anc "alice" ?y "extra")]
+                                     :rules '[[(anc ?x ?y) [?x "parent" ?y]]]}
+                                 everything)))))
+
+(deftest rule-definitions-with-mismatched-arity-throws
+  (let [db (chain-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"same arity"
+                           (dl/q db {:find '[?x ?y]
+                                     :where '[(bad ?x ?y)]
+                                     :rules '[[(bad ?x ?y) [?x "parent" ?y]]
+                                              [(bad ?x) [?x "parent" _]]]}
+                                 everything)))))
+
+(deftest negating-a-rule-invocation-throws
+  (let [db (chain-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"negation of a rule invocation is not supported"
+                           (dl/q db {:find '[?y]
+                                     :where '[[?y "parent" _] (not (ancestor "alice" ?y))]
+                                     :rules ancestor-rules}
+                                 everything)))))
+
+(deftest unsafe-negation-inside-a-rule-body-throws
+  (let [db (chain-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"unsafe negation"
+                           (dl/q db {:find '[?x ?y]
+                                     :where '[(risky ?x ?y)]
+                                     :rules '[[(risky ?x ?y) (not [?x "parent" ?z])]]}
+                                 everything)))))
