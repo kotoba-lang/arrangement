@@ -286,3 +286,71 @@
                                      :where '[(risky ?x ?y)]
                                      :rules '[[(risky ?x ?y) (not [?x "parent" ?z])]]}
                                  everything)))))
+
+;; ── query-language extensions: :in, predicate/function clauses, or/or-join ──
+;; (ADR-2607061200 query-language follow-up)
+
+(defn- ages-db []
+  (-> (arr/empty-db)
+      (arr/assert-quad {:s "alice" :p "age" :o 30})
+      (arr/assert-quad {:s "bob" :p "age" :o 15})
+      (arr/assert-quad {:s "carol" :p "age" :o 45})))
+
+(deftest in-binds-extra-positional-parameters
+  (let [db (ages-db)]
+    (is (= #{["alice"] ["carol"]}
+           (dl/q db {:find '[?s] :in '[?min-age] :where '[[?s "age" ?age] [(> ?age ?min-age)]]}
+                 everything [18])))))
+
+(deftest in-accepts-a-leading-dollar-as-a-noop-db-placeholder
+  (let [db (ages-db)]
+    (is (= #{["alice"] ["carol"]}
+           (dl/q db {:find '[?s] :in '[$ ?min-age] :where '[[?s "age" ?age] [(> ?age ?min-age)]]}
+                 everything [18])))))
+
+(deftest predicate-clause-filters-without-binding
+  (let [db (ages-db)]
+    (is (= #{["alice"] ["carol"]}
+           (dl/q db {:find '[?s] :where '[[?s "age" ?age] [(> ?age 18)]]} everything)))))
+
+(deftest function-clause-binds-a-computed-result
+  (let [db (ages-db)]
+    (is (= #{["alice" 60] ["bob" 30] ["carol" 90]}
+           (dl/q db {:find '[?s ?doubled] :where '[[?s "age" ?age] [(* ?age 2) ?doubled]]} everything)))))
+
+(deftest unbound-variable-inside-predicate-clause-throws
+  (let [db (ages-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"unsafe function/predicate clause"
+                           (dl/q db {:find '[?s] :where '[[(> ?nope 5)]]} everything)))))
+
+(deftest unknown-function-in-clause-throws
+  (let [db (ages-db)]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                           #"unknown or disallowed function"
+                           (dl/q db {:find '[?s] :where '[[?s "age" ?age] [(unknown-fn ?age)]]} everything)))))
+
+(deftest or-clause-unions-alternative-branches
+  (let [db (ages-db)]
+    (is (= #{["alice"] ["carol"]}
+           (dl/q db {:find '[?s] :where '[(or [?s "age" 30] [?s "age" 45])]} everything)))))
+
+(deftest or-clause-respects-visible-in-every-branch
+  (let [db (ages-db)
+        hide-carol (fn [{:keys [s]}] (not= "carol" s))]
+    (is (= #{["alice"]}
+           (dl/q db {:find '[?s] :where '[(or [?s "age" 30] [?s "age" 45])]} hide-carol)))))
+
+(deftest or-join-shares-only-declared-variables
+  (let [db (-> (arr/empty-db)
+               (arr/assert-quad {:s "alice" :p "friend" :o "bob"})
+               (arr/assert-quad {:s "alice" :p "enemy" :o "carol"})
+               (arr/assert-quad {:s "dave" :p "friend" :o "eve"}))]
+    (testing "?f and ?e are branch-local -- only ?s propagates out"
+      (is (= #{["alice"] ["dave"]}
+             (dl/q db {:find '[?s] :where '[(or-join [?s] [?s "friend" ?f] [?s "enemy" ?e])]} everything))))))
+
+(deftest ground-injects-a-literal-constant
+  (let [db (ages-db)]
+    (is (= #{["alice"]}
+           (dl/q db {:find '[?s] :where '[[?s "age" ?age] [(ground 30) ?age]]} everything)))))

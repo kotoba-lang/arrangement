@@ -64,7 +64,16 @@
   naive's full-recompute-every-round cost matter. Guaranteed to terminate
   (derivation is monotonic -- tuples are only ever added -- over `db`'s
   finite domain); a defensive iteration cap throws if the fixpoint
-  somehow fails to converge, rather than looping forever."
+  somehow fails to converge, rather than looping forever.
+
+  ADR-2607061200 query-language follow-up (this landing): `:in` (extra
+  positional query parameters beyond `db`/`visible?`), predicate/function
+  `:where` clauses (`[(> ?age 18)]`, `[(str ?a ?b) ?c]`, a WHITELISTED
+  function registry -- see `query-fns` -- not arbitrary code execution),
+  and `or`/`or-join` (union across alternative derivations). `not-join`
+  (generalized negation over a multi-clause conjunction with explicit
+  variable scoping, vs. today's single-triple `not`) is deliberately NOT
+  included here -- a further follow-up, not a hidden gap."
   (:require [arrangement.query :as query]
             [clojure.set :as set]))
 
@@ -113,42 +122,124 @@
 
 (defn- negated-pattern [not-clause] (second not-clause))
 
+(def ^:private reserved-clause-heads
+  "Symbols that head a special-form clause (`not`/`or`/`or-join`) rather
+  than a rule invocation -- `rule-invocation?` excludes all of these, not
+  just `not` (a clause `(or ...)` is not an attempted call to a rule
+  literally named `or`)."
+  #{'not 'or 'or-join})
+
 (defn- rule-invocation?
   "`(rule-name ?arg ...)` -- a `:where`/rule-body element that's neither a
-  triple-pattern vector nor a `(not ...)` negation, but an invocation of a
-  name declared in `:rules`."
+  triple-pattern vector nor a special-form clause (`not`/`or`/`or-join`),
+  but an invocation of a name declared in `:rules`."
   [x]
-  (and (seq? x) (symbol? (first x)) (not= 'not (first x))))
+  (and (seq? x) (symbol? (first x)) (not (contains? reserved-clause-heads (first x)))))
 
 (defn- rule-name [invocation] (first invocation))
 (defn- rule-args [invocation] (vec (rest invocation)))
 
 (defn- clause-lvars [pattern] (into #{} (filter lvar?) pattern))
 
-(defn- check-negation-safety!
-  "Static pass over a `:where` vector or a rule body, in order: every lvar
-  inside a `(not [e a v])` clause must already have been bound by an
-  earlier POSITIVE clause (a plain triple, or a rule invocation -- both
-  bind the same way). Throws on the first violation instead of running
-  an unsafe (unboundedly enumerable) negation, or if the negated form
-  isn't a plain triple pattern at all (negating a rule invocation isn't
-  supported -- see ns docstring). `not` clauses never contribute new
-  bindings, so they don't extend `bound-so-far` for later clauses either."
-  [clauses]
-  (reduce (fn [bound-so-far clause]
-            (if (not-clause? clause)
-              (let [pattern (negated-pattern clause)]
-                (when-not (vector? pattern)
-                  (throw (ex-info "arrangement.datalog: negation of a rule invocation is not supported -- only (not [e a v]) triple patterns"
-                                  {:clause clause})))
-                (let [unbound (set/difference (clause-lvars pattern) bound-so-far)]
-                  (when (seq unbound)
-                    (throw (ex-info "arrangement.datalog: unsafe negation -- variable(s) not bound by an earlier positive clause"
-                                    {:clause clause :unbound unbound})))
-                  bound-so-far))
-              (into bound-so-far (clause-lvars clause))))
-          #{}
-          clauses))
+(def ^:private query-fns
+  "The WHITELISTED function registry predicate/function `:where` clauses
+  may call (`[(fn-sym arg...)]` / `[(fn-sym arg...) result-var]`) --
+  deliberately a fixed whitelist, not arbitrary code execution: a query is
+  caller-supplied data in this codebase's threat model, same reasoning as
+  `visible?`/rule invocations being data too, never `eval`'d source."
+  {'<              <
+   '>              >
+   '<=             <=
+   '>=             >=
+   '=              =
+   'not=           not=
+   '+              +
+   '-              -
+   '*              *
+   '/              /
+   'str            str
+   'count          count
+   'ground         identity})
+
+(defn- predicate-clause?
+  "`[(fn-sym arg...)]` or `[(fn-sym arg...) result-var]` -- a `:where`
+  element that's a VECTOR whose first element is itself a seq (the
+  function-call form), distinguishing it from a plain `[e a v]` triple
+  pattern (whose first element is never a seq)."
+  [x]
+  (and (vector? x) (seq? (first x))))
+
+(defn- clause-fn-call [pred-clause] (first pred-clause))
+(defn- clause-result-binding [pred-clause] (second pred-clause))
+(defn- fn-call-sym [fn-call] (first fn-call))
+(defn- fn-call-args [fn-call] (vec (rest fn-call)))
+
+(defn- eval-fn-call [binding fn-call]
+  (let [fsym (fn-call-sym fn-call)
+        f (get query-fns fsym)]
+    (when-not f
+      (throw (ex-info "arrangement.datalog: unknown or disallowed function in query clause -- see query-fns for the whitelist"
+                      {:fn fsym})))
+    (apply f (map #(substitute % binding) (fn-call-args fn-call)))))
+
+(defn- or-clause? [x] (and (seq? x) (= 'or (first x))))
+(defn- or-branches [x] (vec (rest x)))
+(defn- or-join-clause? [x] (and (seq? x) (= 'or-join (first x))))
+(defn- or-join-vars [x] (vec (second x)))
+(defn- or-join-branches [x] (vec (rest (rest x))))
+
+(defn- check-clause-safety!
+  "Static pass over a `:where` vector or a rule body, in order (optionally
+  seeded with `initial-bound`, used to check an `or`/`or-join` branch
+  against whatever's already bound OUTSIDE it): every lvar inside a
+  `(not [e a v])` clause, or every ARG lvar inside a predicate/function
+  clause, must already have been bound by an earlier POSITIVE clause (a
+  plain triple, a rule invocation, or a function clause's own result
+  binding -- all bind the same way). Throws on the first violation
+  instead of running an unsafe (unboundedly enumerable) negation/
+  function-call, or if a `not`'s negated form isn't a plain triple
+  pattern at all (negating a rule invocation isn't supported -- see ns
+  docstring). `not`/predicate clauses never contribute new bindings; a
+  function clause's `result-var` does. `or` checks every branch against
+  the SAME outer `bound-so-far` (branches are alternatives, not
+  sequential) and does not itself extend `bound-so-far` (branches aren't
+  required to bind the same variables); `or-join` additionally makes its
+  declared shared-vars available afterward."
+  ([clauses] (check-clause-safety! clauses #{}))
+  ([clauses initial-bound]
+   (reduce (fn [bound-so-far clause]
+             (cond
+               (not-clause? clause)
+               (let [pattern (negated-pattern clause)]
+                 (when-not (vector? pattern)
+                   (throw (ex-info "arrangement.datalog: negation of a rule invocation is not supported -- only (not [e a v]) triple patterns"
+                                   {:clause clause})))
+                 (let [unbound (set/difference (clause-lvars pattern) bound-so-far)]
+                   (when (seq unbound)
+                     (throw (ex-info "arrangement.datalog: unsafe negation -- variable(s) not bound by an earlier positive clause"
+                                     {:clause clause :unbound unbound})))
+                   bound-so-far))
+
+               (predicate-clause? clause)
+               (let [fn-call (clause-fn-call clause)
+                     result-binding (clause-result-binding clause)
+                     unbound (set/difference (clause-lvars (fn-call-args fn-call)) bound-so-far)]
+                 (when (seq unbound)
+                   (throw (ex-info "arrangement.datalog: unsafe function/predicate clause -- variable(s) not bound by an earlier clause"
+                                   {:clause clause :unbound unbound})))
+                 (if (lvar? result-binding) (conj bound-so-far result-binding) bound-so-far))
+
+               (or-clause? clause)
+               (do (doseq [branch (or-branches clause)] (check-clause-safety! [branch] bound-so-far))
+                   bound-so-far)
+
+               (or-join-clause? clause)
+               (do (doseq [branch (or-join-branches clause)] (check-clause-safety! [branch] bound-so-far))
+                   (into bound-so-far (or-join-vars clause)))
+
+               :else (into bound-so-far (clause-lvars clause))))
+           initial-bound
+           clauses)))
 
 (defn- join-clause
   "One step of the join: for every binding so far,
@@ -158,6 +249,18 @@
     (a set of tuples in that rule's own param order, supplied by the
     fixpoint driver or, for a rule-free query, `q` itself) exactly like a
     triple clause resolves against `db`.
+  - `[(fn-sym arg...)]`: keep the binding iff the (whitelisted, see
+    `query-fns`) function call returns truthy -- a predicate, binds
+    nothing new.
+  - `[(fn-sym arg...) result-var]`: compute the function call and unify
+    `result-var` against it -- a function clause, binds `result-var`.
+  - `(or clause1 clause2 ...)`: union of resolving EACH branch against
+    the current bindings independently (an alternative/OR derivation,
+    not a conjunction).
+  - `(or-join [?shared...] clause1 clause2 ...)`: like `or`, but only
+    `?shared` propagates back out of each branch (see `or-join-step`) --
+    branches may use their own internal variable names for everything
+    else.
   - `[e a v]`: resolve against `db` via `arrangement.query/query`.
   Triple and negation cases query through the same `visible?`-filtered
   `arrangement.query/query`, so a negation can never observe a fact
@@ -182,6 +285,36 @@
                                                            substituted tuple)))]
                         (keep #(unify-positional binding args %)
                               (filter matches? extension)))))
+            bindings))
+
+    (predicate-clause? clause)
+    (let [fn-call (clause-fn-call clause)
+          result-binding (clause-result-binding clause)]
+      (if result-binding
+        (into #{}
+              (keep (fn [binding]
+                      (unify-positional binding [result-binding] [(eval-fn-call binding fn-call)])))
+              bindings)
+        (into #{} (filter (fn [binding] (eval-fn-call binding fn-call))) bindings)))
+
+    (or-clause? clause)
+    (into #{} (mapcat (fn [branch] (join-clause bindings branch db visible? extension-for))) (or-branches clause))
+
+    (or-join-clause? clause)
+    (let [shared-vars (set (or-join-vars clause))
+          branches (or-join-branches clause)]
+      (into #{}
+            (mapcat (fn [binding]
+                      (into #{}
+                            (mapcat (fn [branch]
+                                      (into #{}
+                                            (map (fn [extended]
+                                                   (reduce (fn [b v]
+                                                             (if (contains? extended v) (assoc b v (get extended v)) b))
+                                                           binding
+                                                           shared-vars)))
+                                            (join-clause #{binding} branch db visible? extension-for))))
+                            branches)))
             bindings))
 
     :else
@@ -345,34 +478,59 @@
               (group-by (fn [binding] (mapv #(get binding %) group-vars)) bindings))))
     (into #{} (map (fn [binding] (mapv #(get binding %) find))) bindings)))
 
+(defn- flatten-clauses
+  "`or`/`or-join` branches, flattened alongside their own clause -- so a
+  static pass over the result also sees any rule invocation nested
+  inside a branch, not just top-level `:where`/rule-body clauses."
+  [clauses]
+  (mapcat (fn [clause]
+            (cond
+              (or-clause? clause) (cons clause (flatten-clauses (or-branches clause)))
+              (or-join-clause? clause) (cons clause (flatten-clauses (or-join-branches clause)))
+              :else [clause]))
+          clauses))
+
 (defn q
-  "`{:find [?var ...] :where [[e a v] ...] :rules [...]}` over `db`.
-  `visible?` is required and threaded into every underlying
+  "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
+  over `db`. `visible?` is required and threaded into every underlying
   `arrangement.query/query` call, same convention as `arrangement.query`
   itself (ADR-2607050500). Returns a set of `:find`-ordered vectors --
   `nil` for any plain `:find` var a clause never bound (e.g. wildcard-only
   clauses).
 
-  `:where` clauses may be `(not [e a v])` (see ns docstring for the
-  `visible?`/safety contract) or `(rule-name ?arg ...)`, invoking a
-  `:rules` definition. `:find` elements may be `(count ?v)`,
-  `(count-distinct ?v)`, `(sum ?v)`, `(avg ?v)`, `(min ?v)`, or `(max ?v)`
-  alongside plain variables, which then act as GROUP-BY columns (see
-  `project`).
+  `:where` clauses may be:
+    - `(not [e a v])` (see ns docstring for the `visible?`/safety contract)
+    - `(rule-name ?arg ...)`, invoking a `:rules` definition
+    - `[(fn-sym arg...)]` / `[(fn-sym arg...) result-var]`, a whitelisted
+      predicate/function call (see `query-fns`)
+    - `(or clause ...)` / `(or-join [?shared ...] clause ...)`, union
+      across alternative derivations
+  `:find` elements may be `(count ?v)`, `(count-distinct ?v)`, `(sum ?v)`,
+  `(avg ?v)`, `(min ?v)`, or `(max ?v)` alongside plain variables, which
+  then act as GROUP-BY columns (see `project`).
+
+  `:in` (optional) declares extra query parameters -- `inputs` (a 4th,
+  optional arg, positional, same order as `:in`) supplies their values.
+  `'$` in `:in` is accepted as a no-op placeholder for `db` itself
+  (already passed separately); every other symbol consumes one value
+  from `inputs`, pre-bound before `:where` runs.
 
   `:rules` (optional; omit or `[]` for plain Stage 1/2 queries, unchanged)
   is `[[(rule-name ?param ...) clause ...] ...]` -- see ns docstring for
   the fixpoint/semi-naive contract, safety, and the `visible?` guarantee
   extending recursively into rule bodies."
-  [db {:keys [find where rules]} visible?]
-  (let [parsed-rules (parse-rules (or rules []))
-        all-clauses (into where (mapcat :body) (mapcat val parsed-rules))]
-    (check-negation-safety! where)
-    (doseq [[_ defs] parsed-rules] (doseq [{:keys [body]} defs] (check-negation-safety! body)))
-    (check-unknown-rules! all-clauses parsed-rules)
-    (let [full (fixpoint db visible? parsed-rules)
-          bindings (reduce (fn [bindings clause]
-                             (join-clause bindings clause db visible? #(get full % #{})))
-                           #{{}}
-                           where)]
-      (project bindings find))))
+  ([db query visible?] (q db query visible? []))
+  ([db {:keys [find where rules in]} visible? inputs]
+   (let [in-syms (vec (remove #{'$} (or in [])))
+         initial-binding (into {} (map vector in-syms inputs))
+         parsed-rules (parse-rules (or rules []))
+         all-clauses (flatten-clauses (into where (mapcat :body) (mapcat val parsed-rules)))]
+     (check-clause-safety! where (set in-syms))
+     (doseq [[_ defs] parsed-rules] (doseq [{:keys [body]} defs] (check-clause-safety! body)))
+     (check-unknown-rules! all-clauses parsed-rules)
+     (let [full (fixpoint db visible? parsed-rules)
+           bindings (reduce (fn [bindings clause]
+                              (join-clause bindings clause db visible? #(get full % #{})))
+                            #{initial-binding}
+                            where)]
+       (project bindings find)))))
