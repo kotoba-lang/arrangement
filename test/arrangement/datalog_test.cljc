@@ -75,3 +75,113 @@
                      :where '[[?s "role" _]
                               [?s "name" ?name]]}
                  no-bob)))))
+
+;; ── negation (ADR-2607061200 Stage 2) ───────────────────────────────────────
+
+(deftest not-clause-excludes-matching-bindings
+  (let [db (fixture-db)]
+    (testing "everyone who has a name but is NOT an admin"
+      (is (= #{["bob"]}
+             (dl/q db {:find '[?s]
+                       :where '[[?s "name" _]
+                                (not [?s "role" "admin"])]}
+                   everything))))))
+
+(deftest not-clause-with-wildcard-value-excludes-any-value
+  (let [db (-> (fixture-db)
+               (arr/assert-quad {:s "dave" :p "name" :o "Dave"}))]
+    (testing "dave has a name but no role fact at all -- (not [?s \"role\" _]) keeps him"
+      (is (= #{["dave"]}
+             (dl/q db {:find '[?s]
+                       :where '[[?s "name" _]
+                                (not [?s "role" _])]}
+                   everything))))))
+
+(deftest not-clause-can-reference-multiple-earlier-bound-vars
+  (let [db (fixture-db)]
+    (testing "?s bound by clause 1, ?role bound by clause 2, both usable inside (not ...)"
+      (is (= #{["bob" "user"]}
+             (dl/q db {:find '[?s ?role]
+                       :where '[[?s "name" _]
+                                [?s "role" ?role]
+                                (not [?s "role" "admin"])]}
+                   everything))))))
+
+(deftest unbound-variable-inside-not-clause-throws
+  (let [db (fixture-db)]
+    (testing "?role is never bound by a positive clause before the negation -- unsafe, must throw"
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                             #"unsafe negation"
+                             (dl/q db {:find '[?s]
+                                       :where '[[?s "name" _]
+                                                (not [?s "role" ?role])]}
+                                   everything))))))
+
+(deftest not-clause-wildcard-inside-is-always-safe
+  (let [db (fixture-db)]
+    (testing "a wildcard inside (not ...) never needs to be bound -- no throw"
+      (is (= #{["alice"] ["carol"]}
+             (dl/q db {:find '[?s]
+                       :where '[[?s "role" "admin"]
+                                (not [?s "banned" _])]}
+                   everything))))))
+
+(deftest not-clause-respects-visible-just-like-a-positive-clause
+  (let [db (fixture-db)
+        ;; carol's admin-role fact is HIDDEN from this caller -- to them it
+        ;; must look exactly as absent as bob's genuinely-missing admin fact.
+        hide-carols-admin-fact (fn [{:keys [s p o]}] (not (and (= s "carol") (= p "role") (= o "admin"))))]
+    (testing "carol really IS an admin, but this caller can't see that fact -- (not [?s \"role\" \"admin\"]) must keep her, exactly like bob (a genuine non-admin)"
+      (is (= #{["bob"] ["carol"]}
+             (dl/q db {:find '[?s]
+                       :where '[[?s "name" _]
+                                (not [?s "role" "admin"])]}
+                   hide-carols-admin-fact))
+          "without redaction only bob would pass (carol really is an admin); the caller's visible? makes carol indistinguishable from a real non-admin"))))
+
+;; ── aggregation (ADR-2607061200 Stage 2) ────────────────────────────────────
+
+(deftest count-aggregate-ungrouped
+  (let [db (fixture-db)]
+    (is (= #{[3]}
+           (dl/q db {:find '[(count ?s)] :where '[[?s "name" _]]} everything)))))
+
+(deftest count-aggregate-grouped-by-role
+  (let [db (fixture-db)]
+    (is (= #{["admin" 2] ["user" 1]}
+           (dl/q db {:find '[?role (count ?s)] :where '[[?s "role" ?role]]} everything)))))
+
+(deftest count-distinct-aggregate
+  (let [db (-> (arr/empty-db)
+               (arr/assert-quad {:s "alice" :p "tag" :o "x"})
+               (arr/assert-quad {:s "alice" :p "tag" :o "x"})
+               (arr/assert-quad {:s "alice" :p "tag" :o "y"}))]
+    (is (= #{["alice" 2]}
+           (dl/q db {:find '[?s (count-distinct ?v)] :where '[[?s "tag" ?v]]} everything)))))
+
+(deftest sum-avg-min-max-aggregates
+  (let [db (-> (arr/empty-db)
+               (arr/assert-quad {:s "alice" :p "score" :o 10})
+               (arr/assert-quad {:s "alice" :p "score" :o 20})
+               (arr/assert-quad {:s "bob" :p "score" :o 30}))]
+    (is (= #{["alice" 30 15.0 10 20] ["bob" 30 30.0 30 30]}
+           (dl/q db {:find '[?s (sum ?v) (avg ?v) (min ?v) (max ?v)]
+                     :where '[[?s "score" ?v]]}
+                 everything)))))
+
+(deftest ungrouped-aggregate-over-zero-matches-is-one-row-not-empty
+  (let [db (fixture-db)]
+    (is (= #{[0]}
+           (dl/q db {:find '[(count ?s)] :where '[[?s "role" "nonexistent"]]} everything))
+        "Datomic shape: an all-aggregate :find with zero matches is one row of zeros/nils, not an empty set")))
+
+(deftest min-max-of-empty-group-is-nil-not-a-thrown-error
+  (let [db (fixture-db)]
+    (is (= #{[nil nil]}
+           (dl/q db {:find '[(min ?v) (max ?v)] :where '[[?s "score" ?v]]} everything)))))
+
+(deftest aggregate-honors-visible-too
+  (let [db (fixture-db)
+        no-bob (fn [{:keys [s]}] (not= "bob" s))]
+    (is (= #{[2]}
+           (dl/q db {:find '[(count ?s)] :where '[[?s "name" _]]} no-bob)))))
