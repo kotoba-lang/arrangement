@@ -65,6 +65,7 @@
 
 (deftest visible-is-required
   (is (thrown? #?(:clj clojure.lang.ArityException :cljs js/Error)
+               #_:clj-kondo/ignore
                (dl/q (fixture-db) {:find '[?s] :where '[[?s "role" "admin"]]}))))
 
 (deftest visible-applies-per-clause

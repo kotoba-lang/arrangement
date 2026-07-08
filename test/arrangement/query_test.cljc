@@ -43,6 +43,7 @@
 
 (deftest visible-is-required
   (is (thrown? #?(:clj clojure.lang.ArityException :cljs js/Error)
+               #_:clj-kondo/ignore
                (q/query (fixture-db) [nil nil nil]))
       "arrangement.query refuses to run a query with no stated visibility decision"))
 
