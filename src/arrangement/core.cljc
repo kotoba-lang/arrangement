@@ -216,3 +216,44 @@
                                           "index-roots" {"spo" (->link spo) "pso" (->link pso)
                                                          "pos" (->link pos) "ocp" (->link ocp)}
                                           "prev" (->link prev)})))))))
+
+(defn restore
+  "Rebuild a complete in-memory arrangement from a snapshot produced by
+  `commit!`. Reads only the persisted `spo` covering index and derives the
+  other three indexes by re-asserting every recovered triple. `get-fn` is
+  `(fn [cid] bytes)` and `decrypt-fn` is the inverse of the encrypt function
+  supplied to `commit!` (synchronous on clj, Promise-returning on cljs).
+
+  A nil snapshot returns an empty db. Unknown schema versions are rejected
+  instead of being interpreted with the current index shape. Returns a db on
+  clj and a Promise of a db on cljs."
+  [get-fn snapshot-cid decrypt-fn]
+  (if (nil? snapshot-cid)
+    #?(:clj (empty-db) :cljs (js/Promise.resolve (empty-db)))
+    (let [snapshot (ipld/decode (get-fn snapshot-cid))
+          schema-version (get snapshot "schema-version")
+          _ (when-not (= current-schema-version schema-version)
+              (throw (ex-info "Unsupported arrangement snapshot schema"
+                              {:expected current-schema-version
+                               :actual schema-version
+                               :snapshot-cid snapshot-cid})))
+          root-cid (some-> (get-in snapshot ["index-roots" "spo"]) ipld/link-cid)
+          entries (if root-cid (pt/scan-prefix get-fn root-cid "") [])
+          build (fn [triples]
+                  (reduce (fn [db [s p o]]
+                            (assert-quad db {:s (edn->link s)
+                                             :p (edn->link p)
+                                             :o (edn->link o)}))
+                          (empty-db)
+                          triples))]
+      #?(:clj
+         (build (map (fn [[_ ciphertext]]
+                       (ipld/decode (decrypt-fn ciphertext)))
+                     entries))
+         :cljs
+         (-> (js/Promise.all
+              (into-array
+               (map (fn [[_ ciphertext]]
+                      (-> (decrypt-fn ciphertext) (.then ipld/decode)))
+                    entries)))
+             (.then (fn [triples] (build (vec triples)))))))))
