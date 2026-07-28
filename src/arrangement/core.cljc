@@ -25,7 +25,8 @@
   value a Link\") says so; a caller can still pass a different predicate to
   `assert-quad`/`retract-quad` to opt out or widen it."
   (:require [prolly-tree.core :as pt]
-            [ipld.core :as ipld]))
+            [ipld.core :as ipld]
+            [ipld.value :as v]))
 
 (defn empty-db [] {:spo {} :pso {} :pos {} :ocp {}})
 
@@ -88,6 +89,12 @@
 ;; dag-cbor block), so a raw Link would NOT survive that round-trip. Represent
 ;; it instead as a plain 2-vector `["ipld/link" cid]` -- ordinary, portable EDN
 ;; that needs no custom reader on either JVM or ClojureScript.
+;; Still load-bearing on the KEY path (see `index-root`): a leaf key is built
+;; with `pr-str`, and `pr-str` of a Link record is platform-dependent record
+;; printing. It is NO LONGER used on the value path, which is `ipld.value`
+;; (`kotoba.value.v1`) as of schema-version 2 — that codec carries a Link as a
+;; real tag-42 value and needs no textual stand-in. `edn->link` remains the
+;; read path for schema-version 1 snapshots.
 (defn link->edn
   "A Link becomes `[\"ipld/link\" cid]`; anything else passes through."
   [v] (if (ipld/link? v) ["ipld/link" (ipld/link-cid v)] v))
@@ -98,6 +105,44 @@
   [v] (if (and (vector? v) (= 2 (count v)) (= "ipld/link" (first v)))
         (ipld/link (second v))
         v))
+
+(defn- blind-input
+  "What `blind-fn` sees for one s/p/o component.
+
+  Deliberately NOT the `kotoba.value.v1` bytes: `blind-fn` is a caller-supplied
+  keyed MAC whose output a cold reader re-derives to seek by prefix
+  (`kotobase-peer`'s `cold-datoms`), so changing its input is a cross-repo
+  crypto change, not a local one. Typed round-tripping is the VALUE slot's job
+  — which is exactly where a component's type was being lost before."
+  [component]
+  ;; An ALLOWLIST, because the failure mode is silent. `blind-fn` serializes
+  ;; what it is handed — the reference implementation `pr-str`s it — and
+  ;; `pr-str` is canonical for only some values:
+  ;;
+  ;;   set / map      iteration order is undefined -> two runtimes derive
+  ;;                  different seek tokens for the same component
+  ;;   byte array     prints as `#object[[B 0x… "[B@…"]`, an identity hash —
+  ;;                  not stable across two arrays with the SAME bytes, or
+  ;;                  even across runs
+  ;;   record         platform-dependent record printing
+  ;;
+  ;; None of these were rejected before; they produced divergent keys quietly.
+  ;; A Link is admitted by name (it is a `defrecord`, so `map?` is true for it)
+  ;; and goes through `link->edn`, which exists for exactly this reason.
+  ;;
+  ;; This bounds the KEY path only. The VALUE slot is `kotoba.value.v1` and
+  ;; accepts the codec's full admitted set.
+  (when-not (or (nil? component)
+                (boolean? component)
+                (integer? component)
+                (string? component)
+                (keyword? component)
+                (symbol? component)
+                (ipld/link? component))
+    (throw (ex-info "arrangement: component is not a blindable scalar"
+                    {:problem :arrangement/component-not-blindable
+                     :component-type (type component)})))
+  (link->edn component))
 
 ;; ── index-root: JVM (sync) / cljs (async, ADR-2607051000 Worker addendum) ──
 ;; `blind-fn`/`encrypt-fn` carry a DIFFERENT contract per platform, by design:
@@ -129,44 +174,49 @@
   see ADR-2607061800's addendum for why the original ADR text was wrong
   about the value slot).
 
-  `key` is `(pr-str [(blind-fn k1') (blind-fn k2') (blind-fn v')])` (each
-  position passed through `link->edn` first, then `blind-fn` — a keyed,
-  deterministic MAC, e.g. HMAC-SHA256 — so the leaf key is queryable by
-  prefix for a caller who already knows the plaintext component, but is
-  NOT the plaintext, and is NOT order-preserving/full ciphertext).
+  `key` is `(pr-str [(blind-fn a) (blind-fn b) (blind-fn c)])` (each position
+  passed through `blind-input` first, then `blind-fn` — a keyed, deterministic
+  MAC, e.g. HMAC-SHA256 — so the leaf key is queryable by prefix for a caller
+  who already knows the plaintext component, but is NOT the plaintext, and is
+  NOT order-preserving/full ciphertext).
 
-  `val` is `(encrypt-fn (ipld/encode [k1' k2' v']))` — an AEAD ciphertext
-  blob of the REAL `(k1' k2' v')` triple. This is the correction: the
-  ORIGINAL triple lived only in the (now-blinded, one-way, unrecoverable)
-  key, so once the key stopped being plaintext there was nowhere left to
-  read the actual s/p/o payload back from — `val` now carries it,
-  encrypted, so `cold-datoms` (in `kotoba-lang/kotobase-peer`) can decrypt
-  a matched leaf's value to reconstruct the row instead of trying to
-  invert the key.
+  `val` is `(encrypt-fn (ipld.value/encode-value [a b c]))` — an AEAD
+  ciphertext blob of the REAL triple. This is the correction: the ORIGINAL
+  triple lived only in the (now-blinded, one-way, unrecoverable) key, so once
+  the key stopped being plaintext there was nowhere left to read the actual
+  s/p/o payload back from — `val` now carries it, encrypted, so `cold-datoms`
+  (in `kotoba-lang/kotobase-peer`) can decrypt a matched leaf's value to
+  reconstruct the row instead of trying to invert the key.
+
+  **schema-version 2** (ADR-kotoba-canonical-value-codec, VC3): the value slot
+  encodes with `kotoba.value.v1` instead of `ipld/encode`. `ipld/encode` is a
+  NODE codec — it writes a keyword as text and hands back a string, and has no
+  defined order for a set — so a typed component did not survive the
+  round-trip even though its CID verified. The value codec is what makes the
+  s/p/o this repo's own `assert-quad` already accepts (ordinary map keys, any
+  value) actually persistable. The KEY path is deliberately unchanged; see
+  `blind-input`.
 
   `blind-fn`/`encrypt-fn` are REQUIRED (no default — matching this
   codebase's no-silent-default stance, ADR-2607050700, same as
-  `schema-version` below): synchronous on JVM (`(blind-fn link-edn-
+  `schema-version` below): synchronous on JVM (`(blind-fn blind-input-
   component) -> string`, `(encrypt-fn bytes) -> bytes`); Promise-returning
   on cljs (see the platform-contract note above). Returns the root CID
   directly on JVM, a `js/Promise` of it on cljs."
   [put! m blind-fn encrypt-fn]
   #?(:clj
      (let [entries (sort-by first
-                            (for [[k1 m2] m [k2 vs] m2 v vs
-                                  :let [k1' (link->edn k1) k2' (link->edn k2) v' (link->edn v)]]
-                              [(pr-str [(blind-fn k1') (blind-fn k2') (blind-fn v')])
-                               (encrypt-fn (ipld/encode [k1' k2' v']))]))]
+                            (for [[a m2] m [b os] m2 o os]
+                              [(pr-str (mapv #(blind-fn (blind-input %)) [a b o]))
+                               (encrypt-fn (v/encode-value [a b o]))]))]
        (pt/build-tree put! entries))
      :cljs
-     (let [triples (vec (for [[k1 m2] m [k2 vs] m2 v vs
-                              :let [k1' (link->edn k1) k2' (link->edn k2) v' (link->edn v)]]
-                          [k1' k2' v']))]
+     (let [triples (vec (for [[a m2] m [b os] m2 o os] [a b o]))]
        (-> (pmap-async
-            (fn [[k1' k2' v']]
-              (-> (pmap-async blind-fn [k1' k2' v'])
+            (fn [triple]
+              (-> (pmap-async blind-fn (mapv blind-input triple))
                   (.then (fn [blinded]
-                           (-> (encrypt-fn (ipld/encode [k1' k2' v']))
+                           (-> (encrypt-fn (v/encode-value triple))
                                (.then (fn [ct] [(pr-str blinded) ct])))))))
             triples)
            (.then (fn [entries] (pt/build-tree put! (vec (sort-by first entries)))))))))
@@ -177,8 +227,24 @@
   requires the caller to pass a version explicitly (see below); this is
   just the value to pass when you have no other one in mind. Bump this --
   and give callers a migration path keyed on the old value -- the day the
-  4-index shape changes incompatibly."
-  1)
+  4-index shape changes incompatibly.
+
+  **2** (was 1): the leaf VALUE slot moved from `ipld/encode` (a node codec,
+  which loses a keyword's type and has no defined order for a set) to
+  `kotoba.value.v1` via `ipld.value` — ADR-kotoba-canonical-value-codec, VC3.
+  The migration is read-compatible, not a rewrite: `restore` still reads a
+  version-1 snapshot through the old codec (see `supported-schema-versions`).
+  What a version-1 snapshot CANNOT do is retroactively recover a type it never
+  persisted — a keyword written under version 1 comes back as the string it
+  was stored as. New writes are version 2."
+  2)
+
+(def supported-schema-versions
+  "Snapshot versions `restore` can read. Writing is always
+  `current-schema-version`; reading accepts the older shape so an existing
+  store keeps opening. Anything outside this set is rejected by name rather
+  than interpreted under the current index shape."
+  #{1 2})
 
 (defn commit!
   "Snapshot `db`'s 4 indices into 4 prolly-trees via `put!`
@@ -225,35 +291,41 @@
   supplied to `commit!` (synchronous on clj, Promise-returning on cljs).
 
   A nil snapshot returns an empty db. Unknown schema versions are rejected
-  instead of being interpreted with the current index shape. Returns a db on
+  instead of being interpreted with the current index shape; a version this
+  build still supports (`supported-schema-versions`) is decoded with the codec
+  that WROTE it, never reinterpreted under the current one. Returns a db on
   clj and a Promise of a db on cljs."
   [get-fn snapshot-cid decrypt-fn]
   (if (nil? snapshot-cid)
     #?(:clj (empty-db) :cljs (js/Promise.resolve (empty-db)))
     (let [snapshot (ipld/decode (get-fn snapshot-cid))
           schema-version (get snapshot "schema-version")
-          _ (when-not (= current-schema-version schema-version)
+          _ (when-not (contains? supported-schema-versions schema-version)
               (throw (ex-info "Unsupported arrangement snapshot schema"
-                              {:expected current-schema-version
+                              {:problem :arrangement/unsupported-schema-version
+                               :supported supported-schema-versions
+                               :current current-schema-version
                                :actual schema-version
                                :snapshot-cid snapshot-cid})))
+          ;; The codec is chosen by the version the snapshot RECORDS, so a
+          ;; version-1 leaf keeps its original (type-lossy) reading instead of
+          ;; being re-interpreted as kotoba.value.v1 bytes.
+          decode-leaf (if (= 1 schema-version)
+                        (fn [bytes] (mapv edn->link (ipld/decode bytes)))
+                        v/decode-value)
           root-cid (some-> (get-in snapshot ["index-roots" "spo"]) ipld/link-cid)
           entries (if root-cid (pt/scan-prefix get-fn root-cid "") [])
           build (fn [triples]
-                  (reduce (fn [db [s p o]]
-                            (assert-quad db {:s (edn->link s)
-                                             :p (edn->link p)
-                                             :o (edn->link o)}))
+                  (reduce (fn [db [s p o]] (assert-quad db {:s s :p p :o o}))
                           (empty-db)
                           triples))]
       #?(:clj
-         (build (map (fn [[_ ciphertext]]
-                       (ipld/decode (decrypt-fn ciphertext)))
+         (build (map (fn [[_ ciphertext]] (decode-leaf (decrypt-fn ciphertext)))
                      entries))
          :cljs
          (-> (js/Promise.all
               (into-array
                (map (fn [[_ ciphertext]]
-                      (-> (decrypt-fn ciphertext) (.then ipld/decode)))
+                      (-> (decrypt-fn ciphertext) (.then decode-leaf)))
                     entries)))
              (.then (fn [triples] (build (vec triples)))))))))

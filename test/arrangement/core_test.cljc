@@ -6,7 +6,8 @@
             [arrangement.core :as qs]
             [multiformats.core :as mf]
             [prolly-tree.core :as pt]
-            [ipld.core :as ipld])
+            [ipld.core :as ipld]
+            [ipld.value :as v])
   #?(:clj (:import [javax.crypto Cipher Mac]
                    [javax.crypto.spec SecretKeySpec GCMParameterSpec]
                    [java.util Base64])))
@@ -255,8 +256,12 @@
            node (ipld/decode (get-fn cid))
            spo-root (ipld/link-cid (get-in node ["index-roots" "spo"]))
            [[_ leaf-val]] (pt/scan-prefix get-fn spo-root "")
-           [_ _ v] (mapv qs/edn->link (ipld/decode (test-decrypt-fn leaf-val)))]
-       (is (= bafy-link v)
+           ;; schema-version 2: no `edn->link` on the value path. `kotoba.value.v1`
+           ;; carries a Link as a real tag-42 value, so it decodes straight back
+           ;; to a Link -- the `["ipld/link" cid]` textual stand-in is only the
+           ;; KEY path's concern now (and the version-1 read path's).
+           [_ _ o] (v/decode-value (test-decrypt-fn leaf-val))]
+       (is (= bafy-link o)
            "the Link comes back out of the persisted, encrypted index VALUE intact -- not the key, which is one-way blinded and cannot be inverted"))))
 
 #?(:clj
@@ -285,8 +290,12 @@
          (is (bytes? leaf-val))
          (is (not (str/includes? (String. ^bytes leaf-val "ISO-8859-1") secret))))
        (testing "decrypting the value recovers the real triple"
+         ;; schema-version 2: the value slot is `kotoba.value.v1`, not the node
+         ;; codec. Decoding it with `ipld/decode` now yields the codec's own
+         ;; `[type-code payload]` form rather than the triple — which is the
+         ;; point: the value is self-describing about each component's TYPE.
          (is (= ["alice" "role" secret]
-                (ipld/decode (test-decrypt-fn leaf-val))))))))
+                (v/decode-value (test-decrypt-fn leaf-val))))))))
 
 #?(:clj
    (deftest commit-is-content-addressed
@@ -317,7 +326,11 @@
            (is (not= cid1 (qs/commit! put! db2 nil qs/current-schema-version
                                        test-blind-fn test-encrypt-fn)))))
        (testing "different schema-version -> different commit CID"
-         (is (not= cid1 (qs/commit! put! db nil 2 test-blind-fn test-encrypt-fn))))
+         ;; must be a version that is NOT `current-schema-version` — this read
+         ;; `2` back when current was 1, and silently became a no-op assertion
+         ;; the moment VC3 bumped current to 2.
+         (is (not= qs/current-schema-version 99))
+         (is (not= cid1 (qs/commit! put! db nil 99 test-blind-fn test-encrypt-fn))))
        (is (contains? @store cid1)))))
 
 #?(:clj
@@ -398,8 +411,11 @@
                             [[_ leaf-val]] (pt/scan-prefix get-fn spo-root "")]
                         (-> (test-decrypt-fn leaf-val)
                             (.then (fn [pt-bytes]
-                                     (let [[_ _ v] (mapv qs/edn->link (ipld/decode pt-bytes))]
-                                       (is (= bafy-link v)
+                                     ;; schema-version 2: no `edn->link` on the
+                                     ;; value path -- kotoba.value.v1 carries a
+                                     ;; Link as a real tag-42 value.
+                                     (let [[_ _ o] (v/decode-value pt-bytes)]
+                                       (is (= bafy-link o)
                                            "the Link comes back out of the persisted, encrypted index VALUE intact -- not the key, which is one-way blinded and cannot be inverted"))
                                      (done))))))))))))
 
@@ -424,7 +440,9 @@
                         (-> (test-decrypt-fn leaf-val)
                             (.then (fn [pt-bytes]
                                      (testing "decrypting the value recovers the real triple"
-                                       (is (= ["alice" "role" secret] (ipld/decode pt-bytes))))
+                                       ;; schema-version 2: value slot is
+                                       ;; kotoba.value.v1, not the node codec.
+                                       (is (= ["alice" "role" secret] (v/decode-value pt-bytes))))
                                      (done))))))))))))
 
 #?(:cljs
@@ -440,7 +458,9 @@
                    (qs/commit! put! db nil qs/current-schema-version test-blind-fn test-encrypt-fn)
                    (qs/commit! put! db (mf/kotoba-cid "some-other-prev") qs/current-schema-version test-blind-fn test-encrypt-fn)
                    (qs/commit! put! db2 nil qs/current-schema-version test-blind-fn test-encrypt-fn)
-                   (qs/commit! put! db nil 2 test-blind-fn test-encrypt-fn)])
+                   ;; must NOT be `current-schema-version`; this read `2`
+                   ;; back when current was 1 and became a no-op at VC3.
+                   (qs/commit! put! db nil 99 test-blind-fn test-encrypt-fn)])
              (.then (fn [results]
                       (let [[cid1 cid2 cid-other-prev cid-other-db cid-other-schema] (js->clj results)]
                         (testing "same db + prev -> same commit CID"
@@ -495,3 +515,130 @@
                         (is (= qs/current-schema-version (get node "schema-version")))
                         (is (= 2 (get node2 "schema-version")))
                         (done)))))))))
+
+;; ── VC3: typed leaf values + schema-version 2 migration ──────────────────────
+;; ADR-kotoba-canonical-value-codec. `restore` had NO coverage before this
+;; block, which is why the version dispatch it now carries is tested here
+;; rather than assumed.
+
+#?(:clj
+   (defn- v1-commit!
+     "Hand-build a schema-version 1 snapshot: leaf values encoded with the NODE
+     codec, exactly as `index-root` did before VC3. Needed because `commit!`
+     can only write the current version, so a migration test has no other way
+     to obtain genuine old bytes."
+     [put! db]
+     (let [entries (sort-by first
+                            (for [[a m2] (:spo db) [b os] m2 o os
+                                  :let [a' (qs/link->edn a) b' (qs/link->edn b)
+                                        o' (qs/link->edn o)]]
+                              [(pr-str [(test-blind-fn a') (test-blind-fn b') (test-blind-fn o')])
+                               (test-encrypt-fn (ipld/encode [a' b' o']))]))
+           root (pt/build-tree put! entries)]
+       (ipld/put-node! put! {"schema-version" 1
+                             "index-roots" {"spo" (some-> root ipld/link)
+                                            "pso" nil "pos" nil "ocp" nil}
+                             "prev" nil}))))
+
+#?(:clj
+   (deftest typed-components-survive-commit-and-restore
+     ;; The defect VC3 closes: through the node codec a keyword persisted and
+     ;; came back a string, so the value READ was not the value WRITTEN even
+     ;; though its CID verified.
+     (let [{:keys [put! get-fn]} (mem-store)
+           db (-> (qs/empty-db)
+                  (qs/assert-quad {:s :person/alice :p :role :o :admin})
+                  (qs/assert-quad {:s :person/alice :p :age :o 34})
+                  (qs/assert-quad {:s :person/alice :p :label :o "Alice"})
+                  (qs/assert-quad {:s :person/alice :p :knows :o bafy-link}))
+           cid (qs/commit! put! db nil qs/current-schema-version
+                            test-blind-fn test-encrypt-fn)
+           back (qs/restore get-fn cid test-decrypt-fn)]
+       (testing "a keyword stays a keyword, not the string it prints as"
+         (is (= {:role #{:admin} :age #{34} :label #{"Alice"} :knows #{bafy-link}}
+                (qs/entity-attrs back :person/alice)))
+         (is (keyword? (first (qs/by-predicate-value back :role :admin))))
+         (is (= #{:person/alice} (qs/by-predicate-value back :role :admin))))
+       (testing "a keyword and its printed form are DIFFERENT values, both ways"
+         (is (empty? (qs/by-predicate-value back :role "admin")))
+         (is (empty? (qs/by-predicate-value back "role" :admin))))
+       (testing "an integer stays an integer"
+         (is (= #{34} (get (qs/entity-attrs back :person/alice) :age)))
+         (is (integer? (first (get (qs/entity-attrs back :person/alice) :age)))))
+       (testing "a Link stays a Link and is still reverse-indexed"
+         (is (= {:knows #{:person/alice}} (qs/refs-to back bafy-link)))))))
+
+#?(:clj
+   (deftest restore-reads-a-version-1-snapshot-without-reinterpreting-it
+     (let [{:keys [put! get-fn]} (mem-store)
+           db (-> (qs/empty-db)
+                  (qs/assert-quad {:s "alice" :p "role" :o "admin"})
+                  (qs/assert-quad {:s "alice" :p "knows" :o bafy-link}))
+           v1-cid (v1-commit! put! db)
+           back (qs/restore get-fn v1-cid test-decrypt-fn)]
+       (testing "an existing store still opens after the bump"
+         (is (= {"role" #{"admin"} "knows" #{bafy-link}}
+                (qs/entity-attrs back "alice"))))
+       (testing "its leaves are decoded with the codec that WROTE them"
+         ;; decoding version-1 bytes as kotoba.value.v1 would fail closed
+         (let [spo-root (ipld/link-cid (get-in (ipld/decode (get-fn v1-cid))
+                                               ["index-roots" "spo"]))
+               [[_ leaf]] (pt/scan-prefix get-fn spo-root "")]
+           (is (thrown? clojure.lang.ExceptionInfo
+                        (v/decode-value (test-decrypt-fn leaf))))))
+       (testing "but a type version 1 never persisted is NOT retroactively recovered"
+         ;; honest boundary: old data reads back as what it was stored as
+         (is (string? (first (keys (qs/entity-attrs back "alice")))))))))
+
+#?(:clj
+   (deftest restore-rejects-a-schema-version-this-build-does-not-know
+     (let [{:keys [put! get-fn]} (mem-store)
+           future-cid (ipld/put-node! put! {"schema-version" 99
+                                            "index-roots" {"spo" nil "pso" nil
+                                                           "pos" nil "ocp" nil}
+                                            "prev" nil})
+           thrown (try (qs/restore get-fn future-cid test-decrypt-fn) nil
+                       (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+       (is (= :arrangement/unsupported-schema-version (:problem thrown)))
+       (is (= 99 (:actual thrown)))
+       (is (= #{1 2} (:supported thrown)))
+       (is (= #{1 2} qs/supported-schema-versions))
+       (is (= 2 qs/current-schema-version)))))
+
+#?(:clj
+   (deftest key-path-admits-only-blindable-scalars
+     (let [{:keys [put!]} (mem-store)
+           commit-with (fn [o]
+                         (try (qs/commit! put!
+                                          (qs/assert-quad (qs/empty-db) {:s "s" :p "p" :o o})
+                                          nil qs/current-schema-version
+                                          test-blind-fn test-encrypt-fn)
+                              nil
+                              (catch clojure.lang.ExceptionInfo e (:problem (ex-data e)))))]
+       (testing "values whose pr-str is not canonical are rejected, not silently blinded"
+         ;; a set/map has undefined iteration order; a byte array prints with an
+         ;; identity hash, so two arrays with the SAME bytes blind differently
+         (is (= :arrangement/component-not-blindable (commit-with #{1 2})))
+         (is (= :arrangement/component-not-blindable (commit-with {:a 1})))
+         (is (= :arrangement/component-not-blindable (commit-with (byte-array [1 2]))))
+         (is (= :arrangement/component-not-blindable (commit-with (v/float64 1.5)))))
+       (testing "scalars and Links are admitted"
+         (doseq [o [nil true 42 "admin" :admin 'admin bafy-link]]
+           (is (nil? (commit-with o)) (str "should be blindable: " (pr-str o))))))))
+
+#?(:cljs
+   (deftest restore-rejects-a-schema-version-this-build-does-not-know-cljs
+     ;; The version gate runs BEFORE any decrypt, so it is synchronous on both
+     ;; platforms and needs no crypto — which makes it the one part of the new
+     ;; `restore` dispatch that is cheap to cover on this tier too.
+     (let [{:keys [put! get-fn]} (mem-store)
+           future-cid (ipld/put-node! put! {"schema-version" 99
+                                            "index-roots" {"spo" nil "pso" nil
+                                                           "pos" nil "ocp" nil}
+                                            "prev" nil})
+           thrown (try (qs/restore get-fn future-cid identity) nil
+                       (catch :default e (ex-data e)))]
+       (is (= :arrangement/unsupported-schema-version (:problem thrown)))
+       (is (= 99 (:actual thrown)))
+       (is (= #{1 2} qs/supported-schema-versions))
+       (is (= 2 qs/current-schema-version)))))
