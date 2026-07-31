@@ -329,3 +329,92 @@
                       (-> (decrypt-fn ciphertext) (.then decode-leaf)))
                     entries)))
              (.then (fn [triples] (build (vec triples)))))))))
+
+;; ── Incremental commit ──────────────────────────────────────────────────────
+
+(defn- index-triple
+  "The triple `index` stores for quad `{s p o}`, or nil when that index skips
+  it. Mirrors `assert-quad`'s four `upd` calls exactly; if those ever diverge,
+  a delta commit stops matching a full one and the tests below say so."
+  [index {:keys [s p o]} ref?]
+  (case index
+    :spo [s p o]
+    :pso [p s o]
+    :pos [p o s]
+    :ocp (when (ref? o) [o p s])))
+
+(def ^:private index-names
+  [[:spo "spo"] [:pso "pso"] [:pos "pos"] [:ocp "ocp"]])
+
+(defn- prev-root
+  "Root CID of one index in a previously committed snapshot, or nil."
+  [snapshot name]
+  (some-> (get-in snapshot ["index-roots" name]) ipld/link-cid))
+
+(defn commit-delta!
+  "Commit `quads` ON TOP of `prev-commit-cid` without rebuilding the indices,
+  and return the new commit CID.
+
+  `commit!` flattens four in-memory index maps and builds four trees from
+  scratch, so a caller holding a large graph must materialize all of it to add
+  one fact. That is why a fold is O(graph) however little novelty it has, and
+  why folding a million-entity graph does not fit in a Worker's budget. Here
+  each index's previous tree is extended in place through
+  `prolly-tree/insert-many`: only the leaves the new keys land in are read and
+  rewritten, and the internal levels are re-chunked once.
+
+  The result is CID-IDENTICAL to `(commit! put! db prev schema-version ...)`
+  for the db that would result from asserting the same quads — the tests treat
+  any divergence as a failure. It has to be: the whole point of a
+  content-addressed snapshot is that the same content has the same name, and a
+  delta path that produced a different CID for the same graph would break
+  every equality check above it — CAS, dedup, replication — while looking like
+  it worked.
+
+  `prev-commit-cid` nil commits the quads as a first snapshot. `quads` is a
+  seq of `{:s :p :o}`. `ref?` (default `ipld.core/link?`) decides whether `:o`
+  is also indexed in `:ocp`, matching `assert-quad`. `get-fn` reads blocks;
+  everything else matches `commit!`'s contract, including its
+  synchronous-JVM / Promise-cljs split."
+  ([put! get-fn prev-commit-cid quads schema-version blind-fn encrypt-fn]
+   (commit-delta! put! get-fn prev-commit-cid quads schema-version blind-fn
+                  encrypt-fn ipld/link?))
+  ([put! get-fn prev-commit-cid quads schema-version blind-fn encrypt-fn ref?]
+   (let [snapshot (when prev-commit-cid (ipld/decode (get-fn prev-commit-cid)))
+         ->link #(some-> % ipld/link)
+         triples-for (fn [index] (keep #(index-triple index % ref?) quads))]
+     #?(:clj
+        (let [roots (into {}
+                          (map (fn [[index name]]
+                                 (let [entries (mapv (fn [t]
+                                                       [(pr-str (mapv #(blind-fn (blind-input %)) t))
+                                                        (encrypt-fn (v/encode-value t))])
+                                                     (triples-for index))]
+                                   [name (->link (pt/insert-many
+                                                  put! get-fn
+                                                  (prev-root snapshot name)
+                                                  entries))])))
+                          index-names)]
+          (ipld/put-node! put! {"schema-version" schema-version
+                                "index-roots" roots
+                                "prev" (->link prev-commit-cid)}))
+        :cljs
+        (-> (pmap-async
+             (fn [[index name]]
+               (-> (pmap-async
+                    (fn [t]
+                      (-> (pmap-async blind-fn (mapv blind-input t))
+                          (.then (fn [blinded]
+                                   (-> (encrypt-fn (v/encode-value t))
+                                       (.then (fn [ct] [(pr-str blinded) ct])))))))
+                    (vec (triples-for index)))
+                   (.then (fn [entries]
+                            (-> (pt/insert-many put! get-fn
+                                                (prev-root snapshot name)
+                                                (vec entries))
+                                (.then (fn [root] [name (->link root)])))))))
+             index-names)
+            (.then (fn [pairs]
+                     (ipld/put-node! put! {"schema-version" schema-version
+                                           "index-roots" (into {} pairs)
+                                           "prev" (->link prev-commit-cid)}))))))))
