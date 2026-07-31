@@ -75,6 +75,7 @@
   variable scoping, vs. today's single-triple `not`) is deliberately NOT
   included here -- a further follow-up, not a hidden gap."
   (:require [arrangement.query :as query]
+            [clojure.string :as str]
             [clojure.set :as set]))
 
 (defn- lvar?
@@ -127,7 +128,7 @@
   than a rule invocation -- `rule-invocation?` excludes all of these, not
   just `not` (a clause `(or ...)` is not an attempted call to a rule
   literally named `or`)."
-  #{'not 'or 'or-join})
+  #{'not 'or 'or-join 'and})
 
 (defn- rule-invocation?
   "`(rule-name ?arg ...)` -- a `:where`/rule-body element that's neither a
@@ -159,7 +160,16 @@
    '/              /
    'str            str
    'count          count
-   'ground         identity})
+   'ground         identity
+   ;; String predicates. Deliberately NOT regex: a caller-supplied pattern is
+   ;; a ReDoS vector, and a query is caller-supplied data in this codebase's
+   ;; threat model (the same reasoning that makes this a whitelist at all).
+   ;; These three are linear in their inputs and cannot backtrack.
+   'starts-with?   str/starts-with?
+   'ends-with?     str/ends-with?
+   'includes?      str/includes?
+   'lower-case     str/lower-case
+   'upper-case     str/upper-case})
 
 (defn- predicate-clause?
   "`[(fn-sym arg...)]` or `[(fn-sym arg...) result-var]` -- a `:where`
@@ -181,6 +191,19 @@
       (throw (ex-info "arrangement.datalog: unknown or disallowed function in query clause -- see query-fns for the whitelist"
                       {:fn fsym})))
     (apply f (map #(substitute % binding) (fn-call-args fn-call)))))
+
+(defn- and-clause?
+  "A multi-clause branch inside `or`/`or-join`, written the way Datomic writes
+  it: `(and [?e :a 1] [?e :b 2])`.
+
+  A branch used to be one clause, which meant a branch could not both BIND a
+  variable and CONSTRAIN it -- so `(or-join [?e] (and [?e :age ?a] [(> ?a 18)]))`
+  was inexpressible and every comparison inside a disjunction had to be
+  refused. `and` is the form that makes a branch a conjunction; it is only
+  meaningful inside `or`/`or-join`, where a branch position exists."
+  [x] (and (seq? x) (= 'and (first x))))
+
+(defn- and-clauses [x] (vec (rest x)))
 
 (defn- or-clause? [x] (and (seq? x) (= 'or (first x))))
 (defn- or-branches [x] (vec (rest x)))
@@ -224,22 +247,51 @@
                (let [fn-call (clause-fn-call clause)
                      result-binding (clause-result-binding clause)
                      unbound (set/difference (clause-lvars (fn-call-args fn-call)) bound-so-far)]
+                 ;; Checked HERE and not only in `eval-fn-call`, which never
+                 ;; runs when no binding reaches the clause: a query naming a
+                 ;; function that does not exist used to succeed silently
+                 ;; whenever the result set was empty, which is the worst place
+                 ;; to be lenient — it is exactly the case where a typo looks
+                 ;; like a correct answer of "nothing matched".
+                 (when-not (contains? query-fns (fn-call-sym fn-call))
+                   (throw (ex-info "arrangement.datalog: unknown or disallowed function in query clause -- see query-fns for the whitelist"
+                                   {:fn (fn-call-sym fn-call) :clause clause})))
                  (when (seq unbound)
                    (throw (ex-info "arrangement.datalog: unsafe function/predicate clause -- variable(s) not bound by an earlier clause"
                                    {:clause clause :unbound unbound})))
                  (if (lvar? result-binding) (conj bound-so-far result-binding) bound-so-far))
 
                (or-clause? clause)
-               (do (doseq [branch (or-branches clause)] (check-clause-safety! [branch] bound-so-far))
+               ;; An `and` branch is checked as the conjunction it is, so a
+               ;; clause inside it may rely on one earlier in the SAME branch.
+               (do (doseq [branch (or-branches clause)]
+                     (check-clause-safety! (if (and-clause? branch) (and-clauses branch) [branch])
+                                           bound-so-far))
                    bound-so-far)
 
                (or-join-clause? clause)
-               (do (doseq [branch (or-join-branches clause)] (check-clause-safety! [branch] bound-so-far))
+               (do (doseq [branch (or-join-branches clause)]
+                     (check-clause-safety! (if (and-clause? branch) (and-clauses branch) [branch])
+                                           bound-so-far))
                    (into bound-so-far (or-join-vars clause)))
 
                :else (into bound-so-far (clause-lvars clause))))
            initial-bound
            clauses)))
+
+(declare join-clause)
+
+(defn- join-branch
+  "One `or`/`or-join` branch against `bindings`: a conjunction when it is
+  `(and ...)`, a single clause otherwise. Threading the bindings through the
+  conjunction is what lets a branch bind a variable in one clause and constrain
+  it in the next."
+  [bindings branch db visible? extension-for]
+  (if (and-clause? branch)
+    (reduce (fn [bs c] (join-clause bs c db visible? extension-for))
+            bindings
+            (and-clauses branch))
+    (join-clause bindings branch db visible? extension-for)))
 
 (defn- join-clause
   "One step of the join: for every binding so far,
@@ -298,7 +350,8 @@
         (into #{} (filter (fn [binding] (eval-fn-call binding fn-call))) bindings)))
 
     (or-clause? clause)
-    (into #{} (mapcat (fn [branch] (join-clause bindings branch db visible? extension-for))) (or-branches clause))
+    (into #{} (mapcat (fn [branch] (join-branch bindings branch db visible? extension-for)))
+          (or-branches clause))
 
     (or-join-clause? clause)
     (let [shared-vars (set (or-join-vars clause))
@@ -313,7 +366,7 @@
                                                              (if (contains? extended v) (assoc b v (get extended v)) b))
                                                            binding
                                                            shared-vars)))
-                                            (join-clause #{binding} branch db visible? extension-for))))
+                                            (join-branch #{binding} branch db visible? extension-for))))
                             branches)))
             bindings))
 
