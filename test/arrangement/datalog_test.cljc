@@ -355,3 +355,74 @@
   (let [db (ages-db)]
     (is (= #{["alice"]}
            (dl/q db {:find '[?s] :where '[[?s "age" ?age] [(ground 30) ?age]]} everything)))))
+
+;; --- (and ...) branches inside or / or-join --------------------------------
+
+(deftest and-branch-lets-a-branch-bind-then-constrain
+  (testing "a branch used to be ONE clause, so it could not both bind a
+            variable and constrain it — which is exactly what a comparison
+            inside a disjunction needs, and why every such query had to be
+            refused one layer up"
+    (let [db (-> (arr/empty-db)
+                 (arr/assert-quad {:s :a :p :age :o 30})
+                 (arr/assert-quad {:s :a :p :name :o "Alice"})
+                 (arr/assert-quad {:s :b :p :age :o 10})
+                 (arr/assert-quad {:s :b :p :name :o "Bob"})
+                 (arr/assert-quad {:s :c :p :age :o 50})
+                 (arr/assert-quad {:s :c :p :name :o "Carol"}))
+          q (fn [w] (sort (map first (dl/q db {:find '[?n] :where w} (constantly true)))))]
+      (is (= ["Alice" "Carol"]
+             (q '[(or-join [?e] (and [?e :age ?a] [(> ?a 18)]))
+                  [?e :name ?n]]))
+          "bind ?a inside the branch, then constrain it inside the same branch")
+      (is (= ["Alice" "Bob" "Carol"]
+             (q '[(or-join [?e] (and [?e :age ?a] [(> ?a 18)]) [?e :age 10])
+                  [?e :name ?n]]))
+          "an and-branch beside a plain-clause branch"))))
+
+(deftest and-branch-works-in-plain-or-too
+  (let [db (-> (arr/empty-db)
+               (arr/assert-quad {:s :a :p :role :o "admin"})
+               (arr/assert-quad {:s :a :p :tier :o 2})
+               (arr/assert-quad {:s :b :p :role :o "admin"})
+               (arr/assert-quad {:s :b :p :tier :o 1}))
+        r (dl/q db '{:find [?e] :where [(or (and [?e :role "admin"] [?e :tier 2])
+                                                 [?e :role "owner"])]}
+                     (constantly true))]
+    (is (= #{[:a]} (set r)) "only the entity satisfying BOTH clauses of the branch")))
+
+(deftest an-unsafe-and-branch-is-still-rejected
+  (testing "the safety check follows the branch's own order — a predicate may
+            rely on a clause earlier in the SAME branch, and on nothing else"
+    (is (thrown? #?(:clj Exception :cljs :default)
+                 (dl/q (arr/empty-db)
+                            '{:find [?e] :where [(or-join [?e] (and [(> ?a 18)] [?e :age ?a]))]}
+                            (constantly true))))))
+
+;; --- string predicates -----------------------------------------------------
+
+(deftest string-predicates-are-whitelisted
+  (let [db (-> (arr/empty-db)
+               (arr/assert-quad {:s :a :p :name :o "Alice"})
+               (arr/assert-quad {:s :b :p :name :o "Bob"})
+               (arr/assert-quad {:s :c :p :name :o "Alicia"}))
+        q (fn [w] (sort (map first (dl/q db {:find '[?n] :where w} (constantly true)))))]
+    (is (= ["Alice" "Alicia"] (q '[[?e :name ?n] [(starts-with? ?n "Ali")]])))
+    (is (= ["Bob"] (q '[[?e :name ?n] [(ends-with? ?n "ob")]])))
+    (is (= ["Alice" "Alicia"] (q '[[?e :name ?n] [(includes? ?n "lic")]])))))
+
+(deftest an-unknown-function-is-refused-even-with-no-rows
+  (testing "regex is deliberately absent — a caller-supplied pattern is a ReDoS
+            vector, and a query is caller-supplied data here. The refusal is
+            STATIC: eval-fn-call never runs when no binding reaches the clause,
+            so an unknown function used to pass silently whenever the result
+            set was empty, which is the worst place to be lenient — a typo
+            looking exactly like a correct answer of 'nothing matched'"
+    (is (thrown-with-msg? #?(:clj Exception :cljs :default) #"unknown or disallowed"
+                 (dl/q (arr/empty-db)
+                            '{:find [?n] :where [[?e :name ?n] [(re-find "x" ?n)]]}
+                            (constantly true))))
+    (is (thrown-with-msg? #?(:clj Exception :cljs :default) #"unknown or disallowed"
+                 (dl/q (arr/empty-db)
+                            '{:find [?n] :where [[?e :name ?n] [(eval ?n)]]}
+                            (constantly true))))))

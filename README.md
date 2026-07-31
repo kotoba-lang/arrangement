@@ -98,3 +98,30 @@ npm run test:cljs       # real shadow-cljs (not nbb -- see this org's own
 ## License
 
 MIT
+
+
+### `or` / `or-join` branches may be conjunctions
+
+A branch used to be a single clause, so it could not both BIND a variable and
+CONSTRAIN it — which is exactly what a comparison inside a disjunction needs.
+`(and ...)` is the branch form that fixes it, spelled the way Datomic spells
+it:
+
+```clojure
+(or-join [?e] (and [?e :age ?a] [(> ?a 18)]) [?e :vip true])
+```
+
+The safety check follows the branch's own order: a predicate may rely on a
+clause earlier in the SAME branch, and on nothing else.
+
+### String predicates, and no regex
+
+`query-fns` gains `starts-with?`, `ends-with?`, `includes?`, `lower-case` and
+`upper-case`. **Regex is deliberately absent**: a caller-supplied pattern is a
+ReDoS vector, and a query is caller-supplied data here — the same reasoning
+that makes the registry a whitelist at all. These five are linear in their
+inputs and cannot backtrack.
+
+An unknown function is now refused by the STATIC safety pass rather than only
+by `eval-fn-call`, which never runs when no binding reaches the clause. A typo
+in a query used to succeed silently whenever the result set was empty.
