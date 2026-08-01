@@ -75,8 +75,27 @@
   variable scoping, vs. today's single-triple `not`) is deliberately NOT
   included here -- a further follow-up, not a hidden gap."
   (:require [arrangement.query :as query]
+            [arrangement.source :as source]
+            [datom.source :as ds]
             [clojure.string :as str]
             [clojure.set :as set]))
+
+(defn- scan*
+  "Resolve one clause pattern against `db`, which may be EITHER a materialized
+  db (the historical argument) or anything satisfying
+  `datom.source/IPatternSource`.
+
+  This one function is what puts the whole Datalog engine on top of the seam.
+  Every clause resolution in this namespace goes through it, so swapping a
+  cursor source in for a materialized db changes the cost of a join without
+  changing a line of join logic — which is the point of having had a seam at
+  all. `visible?` is applied identically in both branches; a source that
+  filtered differently from `arrangement.query/query` would let a negation
+  observe a fact a positive clause cannot see."
+  [db pattern visible?]
+  (if (satisfies? ds/IPatternSource db)
+    (into #{} (filter visible?) (ds/scan db pattern))
+    (query/query db pattern visible?)))
 
 (defn- lvar?
   "True for a Datalog logic variable: a symbol whose name starts with `?`.
@@ -323,7 +342,7 @@
     (let [pattern (negated-pattern clause)]
       (into #{}
             (remove (fn [binding]
-                      (seq (query/query db (mapv #(substitute % binding) pattern) visible?))))
+                      (seq (scan* db (mapv #(substitute % binding) pattern) visible?))))
             bindings))
 
     (rule-invocation? clause)
@@ -375,7 +394,7 @@
           (mapcat (fn [binding]
                     (let [pattern (mapv #(substitute % binding) clause)]
                       (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
-                            (query/query db pattern visible?)))))
+                            (scan* db pattern visible?)))))
           bindings)))
 
 ;; ── recursive rules: parsing + semi-naive fixpoint ──────────────────────────

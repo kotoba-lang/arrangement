@@ -40,6 +40,7 @@
             [datom.source :as ds]
             [arrangement.core :as arr]
             [arrangement.query :as q]
+            [arrangement.partitioned :as part]
             [prolly-tree.core :as pt]
             [ipld.core :as ipld]
             [ipld.value :as v]))
@@ -142,3 +143,40 @@
   Deliberately not faked with a synchronous stub."
   [get-fn snapshot-cid blind-fn decrypt-fn]
   (->CursorSource get-fn (or (snapshot-roots get-fn snapshot-cid) {}) blind-fn decrypt-fn))
+
+;; ── brick 2: compaction ──────────────────────────────────────────────
+;; A partitioned root (ADR-2608011200) lets N writers commit without
+;; contending, and `datom.source/merged` reads it back as one plane. But a
+;; merged source is k sources, so a scan opens k cursors — and at k=200 that
+;; measured 413 block reads per query for 2,000 facts. Compaction is what
+;; every LSM engine does about exactly this: fold the runs in the background
+;; so the read path sees one tree again.
+;;
+;; The result is an ordinary snapshot, so `cursor` reads it with no special
+;; case. That is the property worth having: compaction is not a mode the
+;; reader has to know about.
+
+(defn compact-root!
+  "Fold every partition under a partitioned root into ONE snapshot, and
+  return its CID.
+
+  Cost is O(all facts) and is paid per COMPACTION, not per query — which is
+  the whole trade. Run it from the same batcher that advances the root
+  (`arrangement.partitioned/advance-root-batched!`); running it in the query
+  path would reintroduce the cost it exists to remove.
+
+  Compaction is a read-path optimisation and nothing else: it produces the
+  same facts, so a reader that queries the partitions directly and one that
+  queries the compacted snapshot must agree. There is a test asserting that
+  rather than a comment claiming it."
+  [put! get-fn root-cid blind-fn encrypt-fn decrypt-fn]
+  (let [db (part/restore-all get-fn root-cid decrypt-fn)]
+    (arr/commit! put! db nil arr/current-schema-version blind-fn encrypt-fn)))
+
+(defn compacted-cursor
+  "Compact `root-cid` and hand back a `cursor` over the result. Convenience
+  for the common shape; the two halves are separate above because the
+  compaction belongs on a background clock and the cursor does not."
+  [put! get-fn root-cid blind-fn encrypt-fn decrypt-fn]
+  (cursor get-fn (compact-root! put! get-fn root-cid blind-fn encrypt-fn decrypt-fn)
+          blind-fn decrypt-fn))
