@@ -40,6 +40,17 @@
     (some? p)
     (into #{} (for [[s2 os] (arr/by-predicate db p) o2 os] {:s s2 :p p :o o2}))
 
+    ;; `[_ _ o]` — bound VALUE only. Before this branch existed the pattern
+    ;; fell through to `:else` and returned the ENTIRE database, ignoring the
+    ;; object it was given: a single-clause query answered wrongly, and a
+    ;; Datalog clause of this shape produced an intermediate set of every
+    ;; datom. There is no index for it (`:ocp` covers only ref-valued objects,
+    ;; matching `assert-quad`'s `ref?`), so it is an honest O(database) scan --
+    ;; but a correct one. Found by datom-source's conformance suite.
+    (some? o)
+    (into #{} (for [[s2 pm] (:spo db) [p2 os] pm o2 os :when (= o o2)]
+                {:s s2 :p p2 :o o2}))
+
     :else
     (into #{} (for [[s2 pm] (:spo db) [p2 os] pm o2 os] {:s s2 :p p2 :o o2}))))
 

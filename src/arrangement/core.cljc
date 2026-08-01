@@ -106,8 +106,14 @@
         (ipld/link (second v))
         v))
 
-(defn- blind-input
+(defn blind-input
   "What `blind-fn` sees for one s/p/o component.
+
+  PUBLIC because deriving it is exactly how a cold reader seeks by prefix
+  without materializing the db (`arrangement.source/cursor`, and
+  `kotobase-peer`'s `cold-datoms` before it). Keeping it private forced every
+  such reader to re-implement it, which is how two copies of a crypto input
+  drift apart.
 
   Deliberately NOT the `kotoba.value.v1` bytes: `blind-fn` is a caller-supplied
   keyed MAC whose output a cold reader re-derives to seek by prefix
