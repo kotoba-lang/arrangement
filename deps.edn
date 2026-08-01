@@ -1,6 +1,7 @@
 {:paths ["src"]
  :deps {io.github.kotoba-lang/prolly-tree {:git/sha "e91eefcd21a4c5302868e519659433385a020961"}
-        io.github.kotoba-lang/io-ipld {:git/sha "e08dc3b2ab705be292e388cd1ad136381544a041"}}
+        io.github.kotoba-lang/io-ipld {:git/sha "e08dc3b2ab705be292e388cd1ad136381544a041"}
+        io.github.kotoba-lang/datom-source {:git/sha "57b055c3622614c19ad73c8b8733e897395447ac"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
