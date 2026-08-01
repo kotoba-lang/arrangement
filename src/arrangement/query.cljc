@@ -40,6 +40,29 @@
     (some? p)
     (into #{} (for [[s2 os] (arr/by-predicate db p) o2 os] {:s s2 :p p :o o2}))
 
+    ;; `[_ _ o]` -- bound VALUE only. Without this branch the pattern fell
+    ;; through to `:else` and returned the ENTIRE database, ignoring the
+    ;; object it was given. That is a correctness bug, not a slow path:
+    ;; `kotobase-peer/q` answered a value-only triple pattern with every quad
+    ;; in the graph, and `arrangement.datalog/q` answered
+    ;; `{:find [?e ?a] :where [[?e ?a "30"]]}` with every (s,p) pair --
+    ;; unification does NOT re-check a literal in a position where the other
+    ;; two are variables, so the wrong rows survive to the result.
+    ;;
+    ;; There is no index for this shape (`:ocp` covers only ref-valued
+    ;; objects, matching `assert-quad`'s `ref?`; Datomic's AVET is `[a v e]`
+    ;; and has the same gap), so it is an honest O(database) scan -- but a
+    ;; correct one.
+    ;;
+    ;; BACKPORT. This is the same fix as arrangement main's, applied on top of
+    ;; the sha `kotobase-peer` pins, because advancing that pin to main pulls
+    ;; in the commit-delta/insert-many work and fails 30 of kotobase-peer's
+    ;; own tests. Upgrading properly is separate work; this closes the
+    ;; correctness hole in the meantime.
+    (some? o)
+    (into #{} (for [[s2 pm] (:spo db) [p2 os] pm o2 os :when (= o o2)]
+                {:s s2 :p p2 :o o2}))
+
     :else
     (into #{} (for [[s2 pm] (:spo db) [p2 os] pm o2 os] {:s s2 :p p2 :o o2}))))
 
