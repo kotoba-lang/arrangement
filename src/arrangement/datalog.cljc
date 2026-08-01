@@ -390,12 +390,31 @@
             bindings))
 
     :else
-    (into #{}
-          (mapcat (fn [binding]
-                    (let [pattern (mapv #(substitute % binding) clause)]
-                      (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
-                            (scan* db pattern visible?)))))
-          bindings)))
+    ;; One `scan*` per DISTINCT substituted pattern, not one per binding.
+    ;;
+    ;; Measured (kotobase-peer bench/results/2026-08-01-ic09-diagnosis.edn,
+    ;; ADR-2608021000): LDBC SNB IC09's two-hop expansion spent 35.6 s of its
+    ;; 45.3 s inside this function. The planner was not the problem -- it chose
+    ;; the right clause order, and its cardinality probes were 8% of the time.
+    ;; The cost was that a step carrying ~31,750 bindings issued ~31,750
+    ;; separate `scan*` calls, each building its own result set and running
+    ;; `visible?` over it, while those bindings substitute down to at most a
+    ;; few thousand distinct patterns.
+    ;;
+    ;; Bindings sharing a substituted pattern now share one scan and are
+    ;; unified against its rows individually, so the returned set is identical
+    ;; row for row. This changes how often the source is asked, not what is
+    ;; asked or what comes back -- which matters most for `IPatternSource`,
+    ;; where every scan may be a network round trip.
+    (let [groups (group-by (fn [binding] (mapv #(substitute % binding) clause)) bindings)]
+      (into #{}
+            (mapcat (fn [[pattern group]]
+                      (let [rows (scan* db pattern visible?)]
+                        (mapcat (fn [binding]
+                                  (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
+                                        rows))
+                                group))))
+            groups))))
 
 ;; ── recursive rules: parsing + semi-naive fixpoint ──────────────────────────
 
@@ -562,6 +581,61 @@
               :else [clause]))
           clauses))
 
+(defn- order-spec
+  "Normalize `:order-by` into `[[find-position direction] ...]`. Each element
+  is a `:find` element (a plain var, or an aggregate form written exactly as
+  it appears in `:find`), optionally wrapped as `[element :asc|:desc]`.
+  Ordering by something not in `:find` is rejected rather than silently
+  ignored -- the rows being ordered ARE the projection, so a key outside it
+  does not exist at this point."
+  [find order-by]
+  (mapv (fn [element]
+          (let [[k dir] (if (and (vector? element) (#{:asc :desc} (second element)))
+                          element
+                          [element :asc])
+                ;; portable index lookup -- this ns is .cljc and
+                ;; `.indexOf` with a java.util.List hint does not exist on cljs
+                idx (or (first (keep-indexed (fn [i e] (when (= e k) i)) find)) -1)]
+            (when (neg? idx)
+              (throw (ex-info "arrangement.datalog: :order-by key is not in :find"
+                              {:key k :find find})))
+            [idx dir]))
+        order-by))
+
+(defn- compare-rows [spec a b]
+  (reduce (fn [_ [idx dir]]
+            (let [c (compare (nth a idx) (nth b idx))
+                  c (if (= dir :desc) (- c) c)]
+              (if (zero? c) 0 (reduced c))))
+          0 spec))
+
+(defn- order+limit
+  "Apply `:order-by` / `:limit` to a projected result.
+
+  RETURN TYPE: without either key this returns the SET `project` produced,
+  exactly as before. With either key it returns a VECTOR, because an ordered
+  result is a sequence and a set cannot carry order -- a caller asking for
+  ordering is asking for the thing a set cannot represent. `:limit` alone
+  also returns a vector; without `:order-by` WHICH rows come back is
+  unspecified (the set's iteration order), so a bare `:limit` is only
+  meaningful for `count`-style probes, not for top-N.
+
+  WHAT THIS IS NOT: the limit is applied to the finished projection, so the
+  join still does all of its work. It makes top-N EXPRESSIBLE -- the caller
+  no longer sorts the whole result in host code -- but it does not yet make
+  it cheaper. Pushing a limit into the join needs the ordering clause to
+  drive iteration, which is possible here because the value-ordered index
+  already yields `[p o s]` in `o` order; that is a separate change and is
+  not claimed by this one."
+  [rows find order-by limit]
+  (if (and (empty? order-by) (nil? limit))
+    rows
+    (let [spec (order-spec find order-by)
+          ordered (if (seq spec)
+                    (vec (sort #(compare-rows spec %1 %2) rows))
+                    (vec rows))]
+      (if limit (vec (take limit ordered)) ordered))))
+
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
   over `db`. `visible?` is required and threaded into every underlying
@@ -590,9 +664,25 @@
   `:rules` (optional; omit or `[]` for plain Stage 1/2 queries, unchanged)
   is `[[(rule-name ?param ...) clause ...] ...]` -- see ns docstring for
   the fixpoint/semi-naive contract, safety, and the `visible?` guarantee
-  extending recursively into rule bodies."
+  extending recursively into rule bodies.
+
+  `:order-by` / `:limit` (optional) make top-N expressible in the query
+  instead of in host code. `:order-by` is a vector of `:find` elements,
+  each optionally `[element :asc|:desc]` (default `:asc`); a key that is
+  not in `:find` is an error, not a no-op. Supplying either key changes
+  the return type from a SET to a VECTOR, because an ordered result is a
+  sequence. `:limit` without `:order-by` returns an unspecified subset --
+  useful for probes, not for top-N.
+
+  These are applied to the finished projection: the join still does all
+  of its work, so this makes top-N SAYABLE, not yet cheaper. Every LDBC
+  SNB complex read is a \"most recent N\" query, and until this existed a
+  caller had to materialize the whole join and sort it in host code
+  (kotobase-peer bench/results/2026-08-01-ldbc-snb-interactive.edn did
+  exactly that, and said so). Pushing the limit into the join is a
+  separate change -- see `order+limit`."
   ([db query visible?] (q db query visible? []))
-  ([db {:keys [find where rules in]} visible? inputs]
+  ([db {:keys [find where rules in order-by limit]} visible? inputs]
    (let [in-syms (vec (remove #{'$} (or in [])))
          initial-binding (into {} (map vector in-syms inputs))
          parsed-rules (parse-rules (or rules []))
@@ -605,4 +695,4 @@
                               (join-clause bindings clause db visible? #(get full % #{})))
                             #{initial-binding}
                             where)]
-       (project bindings find)))))
+       (order+limit (project bindings find) find order-by limit)))))
