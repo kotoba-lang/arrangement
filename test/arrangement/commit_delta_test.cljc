@@ -180,3 +180,74 @@
                (.catch (fn [e]
                          (is false (str "cljs commit-delta! threw: " e))
                          (done)))))))))
+
+;; ── the writes are awaited, not merely issued ───────────────────────────────
+;;
+;; The test above proves the cljs path COMPLETES and agrees with `commit!`. It
+;; cannot prove the second thing, because its store applies writes the moment
+;; it is called: a dropped write promise would still have landed by the time
+;; anything looked.
+;;
+;; That mattered. `pt/insert-many` ignores what `put!` returns, and so does
+;; `ipld/put-node!` -- so both the index blocks and the commit node naming
+;; them were issued and never waited on. A caller got a commit CID, published
+;; it as a head, and the blocks it names could still be in flight. On an
+;; in-process store that is invisible; on a Worker talking to R2 it is a head
+;; pointing at nothing.
+;;
+;; Eight turns, not one: a single `.then` still lands before the caller's next
+;; read even when its promise is dropped -- measured on kotobase-storage's
+;; signed head, where removing an await left that suite green.
+#?(:cljs
+   (defn- deferred-store
+     "Writes complete OUT OF ISSUE ORDER, earliest slowest, on real timers.
+
+     Two weaker designs were tried and neither could fail. Microtask turns
+     preserve issue order, so awaiting the last-issued write (the commit node)
+     implicitly awaits every earlier one, and the suite passed against code
+     that waited for none of them. Making the turn count depend on an issue
+     counter did not help either -- reads share the counter, so it saturated
+     long before the writes began.
+
+     `setTimeout` genuinely reorders: a write issued last with 0ms lands
+     before one issued first with 60ms. That is also the honest model, because
+     a store gives no ordering guarantee across independent PUTs -- 'issued
+     first' and 'landed first' are different claims, and correctness must not
+     rest on the second."
+     []
+     (let [blocks (atom {})
+           issued (atom 0)
+           later (fn [f]
+                   (let [n (swap! issued inc)
+                         ms (max 0 (- 60 (* 3 n)))]
+                     (js/Promise. (fn [resolve*]
+                                    (js/setTimeout #(resolve* (f)) ms)))))]
+       {:put! (fn [cid bytes] (later #(do (swap! blocks assoc cid bytes) cid)))
+        :get-fn (fn [cid] (later #(get @blocks cid)))
+        :blocks blocks})))
+
+#?(:cljs
+   (deftest cljs-commit-delta-awaits-every-write
+     (testing "when the promise resolves, every block the commit names has
+               landed -- nothing is still in flight"
+       (async done
+         (let [{:keys [put! get-fn blocks]} (deferred-store)
+               quads (mapv quad (range 120))]
+           (-> (a/commit-delta! put! get-fn nil quads a/current-schema-version
+                                blind-fn encrypt-fn)
+               (.then (fn [cid]
+                        (let [at-resolve (count @blocks)]
+                          (is (some? (get @blocks cid))
+                              "the commit node's own block is in the store")
+                          ;; Let plenty of turns pass. If anything was issued
+                          ;; and not awaited, it lands here -- and a store that
+                          ;; grows after the caller was told the commit was
+                          ;; done is exactly the defect.
+                          (-> (js/Promise. (fn [r] (js/setTimeout r 300)))
+                              (.then (fn [_]
+                                       (is (= at-resolve (count @blocks))
+                                           (str "no writes landed after resolve "
+                                                "(was " at-resolve ", now "
+                                                (count @blocks) ")"))
+                                       (done)))))))
+               (.catch (fn [e] (is false (str "threw: " e)) (done)))))))))
