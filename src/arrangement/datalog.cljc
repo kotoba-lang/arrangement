@@ -74,7 +74,8 @@
   (generalized negation over a multi-clause conjunction with explicit
   variable scoping, vs. today's single-triple `not`) is deliberately NOT
   included here -- a further follow-up, not a hidden gap."
-  (:require [arrangement.query :as query]
+  (:require [arrangement.core :as arr]
+            [arrangement.query :as query]
             [arrangement.source :as source]
             [datom.source :as ds]
             [clojure.string :as str]
@@ -747,6 +748,130 @@
                     (vec rows))]
       (if limit (vec (take limit ordered)) ordered))))
 
+(defn- run-clauses
+  "Fold `clauses` over `bindings`, pruning between steps as `q` does.
+  `extra-needed` are variables a join OUTSIDE this fold still matches on --
+  without them, pruning would drop the very keys that join needs.
+
+  Extracted so the ordered-driver path below runs its clauses through the same
+  code as the ordinary path; a second copy of the join loop is how the two
+  would drift."
+  [bindings clauses db visible? extension-for cardinality find prune? extra-needed]
+  (reduce (fn [bs [i clause]]
+            (let [bs' (join-clause bs clause db visible? extension-for cardinality)]
+              (if prune?
+                (prune-bindings bs' (into (into (form-lvars find) extra-needed)
+                                          (form-lvars (subvec (vec clauses) (inc i)))))
+                bs')))
+          bindings
+          (map-indexed vector clauses)))
+
+(defn- plain-triple?
+  "A positive `[e a v]` clause -- not a `not`, `or`, `or-join`, rule
+  invocation, or function/predicate call, which are seq-shaped or shorter."
+  [clause]
+  (and (vector? clause) (= 3 (count clause)) (not (seq? (first clause)))))
+
+(defn- join-bindings
+  "Relational join of two binding sets on the variables they share. Every
+  binding within a set has the same keys here (only plain triples reach this
+  path), so the shared keys are read off one member of each."
+  [as bs]
+  (cond
+    (empty? as) #{}
+    (empty? bs) #{}
+    :else
+    (let [shared (vec (clojure.set/intersection (set (keys (first as))) (set (keys (first bs)))))
+          idx (group-by (fn [b] (mapv b shared)) bs)]
+      (into #{} (mapcat (fn [a] (map #(merge a %) (get idx (mapv a shared))))) as))))
+
+(def ^:private driver-selectivity-budget
+  "Drive only when the ordering clause is no more than this multiple of the
+  most selective other clause. Above it, that other clause is the cheaper
+  place to start and the ordinary path already starts there.
+
+  8 puts the measured workload's two queries on opposite sides without either
+  sitting on the line: IC02's ordering clause and its selective clause are both
+  thousands of rows, while IC08's most selective clause resolves to a single
+  person's messages against 7,355 dated replies. A starting point chosen from
+  two data points, not a tuned constant."
+  8)
+
+(defn- ordered-driver
+  "The clause an ordered scan can be driven from, or nil. Each requirement is
+  load-bearing: a `:limit` and an `:order-by` whose FIRST key is a plain
+  `:find` variable (later keys only break ties inside a value group, which is
+  always drained whole); that variable bound by exactly ONE clause, else the
+  value a group fixes is not the value the row sorts by; in that clause's
+  VALUE position with a literal attribute and variable subject, so `:pos` can
+  enumerate; and every clause a plain triple, because a not/or/rule/function
+  clause binds or rejects in ways a value-ordered walk cannot reason about.
+
+  Fail any and the ordinary path runs, which is always correct."
+  [where find order-by limit cardinality]
+  (when (and limit (seq order-by) (every? plain-triple? where))
+    (let [e (first order-by)
+          k (if (vector? e) (first e) e)
+          desc? (and (vector? e) (= :desc (second e)))]
+      (when (and (lvar? k) (some #{k} find))
+        (let [carriers (filter (fn [[_ a v]] (and (= v k) (string? a))) where)]
+          (when (and (= 1 (count carriers))
+                     (= 1 (count (filter #(contains? (clause-lvars %) k) where))))
+            (let [[sv a _] (first carriers)
+                  driver (first carriers)
+                  driver-rows (get cardinality driver)
+                  most-selective (->> (remove #{driver} where)
+                                      (keep #(get cardinality %))
+                                      (reduce min ##Inf))]
+              (when (and (lvar? sv)
+                         ;; SELECTIVITY. Driving pays off only when the answer
+                         ;; is dense in the ordering clause's value space: the
+                         ;; walk stops early only if hits arrive early. When
+                         ;; ANOTHER clause is far more selective, the ordinary
+                         ;; path starts from that clause and expands, while the
+                         ;; drive walks every value group and never fills the
+                         ;; limit.
+                         ;;
+                         ;; Measured (kotobase-peer
+                         ;; bench/results/2026-08-02-ldbc-snb-after-join-work.edn
+                         ;; and the LDBC run of this change): IC02 matches 910
+                         ;; of 7,355 messages and driving wins; IC08's replies
+                         ;; to one person's messages are a handful out of 7,355
+                         ;; date groups, and driving walked all of them. The
+                         ;; ratio is what separates the two, and the planner
+                         ;; already computes both numbers -- they arrive here as
+                         ;; :clause-cardinality (ADR-2608021000 §6-4-1).
+                         ;;
+                         ;; Without a hint this declines. An unmeasured drive is
+                         ;; how the first two attempts at this feature went
+                         ;; wrong.
+                         (some? driver-rows)
+                         (<= driver-rows (* driver-selectivity-budget most-selective)))
+                {:clause driver :attr a :subject-var sv :key-var k :desc? desc?}))))))))
+
+(defn- split-by-driver
+  "Non-driver clauses partitioned into those mentioning a variable the driver
+  binds and those not.
+
+  This is the whole correction over the first attempt at this feature, which
+  re-ran EVERY remaining clause once per value group. IC02's
+  `[?person \"knows\" ?friend]` mentions neither the driver's subject nor its
+  key, so its 882 rows were re-derived for all 7,355 date groups -- 6.5M rows
+  of repetition, incurred to avoid joining 7,355. Clauses independent of the
+  driver are evaluated ONCE and joined in.
+
+  Independence is judged against the driver's own two variables, NOT their
+  transitive closure. Closure would pull in everything sharing a variable with
+  a dependent clause and hoist nothing. The partition only has to be a
+  partition: conjunction is associative, so joining the two halves on their
+  shared variables is the same relation either way."
+  [where driver]
+  (let [{:keys [clause subject-var key-var]} driver
+        bound #{subject-var key-var}
+        others (remove #{clause} where)
+        dep? #(seq (clojure.set/intersection bound (clause-lvars %)))]
+    {:dependent (vec (filter dep? others)) :independent (vec (remove dep? others))}))
+
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
   over `db`. `visible?` is required and threaded into every underlying
@@ -819,13 +944,49 @@
            ;; answer, so it is off entirely in that case rather than
            ;; conditionally per column.
            prune? (not (some agg-find? find))
-           bindings (reduce (fn [bindings [i clause]]
-                              (let [bs (join-clause bindings clause db visible?
-                                                    #(get full % #{}) clause-cardinality)]
-                                (if prune?
-                                  (prune-bindings bs (into (form-lvars find)
-                                                           (form-lvars (subvec (vec where) (inc i)))))
-                                  bs)))
-                            #{initial-binding}
-                            (map-indexed vector where))]
-       (order+limit (project bindings find) find order-by limit)))))
+           extension-for #(get full % #{})
+           driver (when prune? (ordered-driver where find order-by limit clause-cardinality))]
+       (if driver
+         ;; ORDERED DRIVE. Walk the driver clause's distinct values in sort
+         ;; order; per value, join its rows through the clauses that DEPEND on
+         ;; the driver, then join that against the driver-independent clauses
+         ;; evaluated ONCE; stop when `limit` distinct rows exist.
+         ;;
+         ;; Sound because every row from a value group sorts by that value,
+         ;; groups are walked in order, and a group is drained whole -- so once
+         ;; `limit` rows are in hand nothing unvisited can outrank them, and
+         ;; secondary keys only reorder inside a group already complete.
+         (let [{:keys [clause attr subject-var key-var desc?]} driver
+               {:keys [dependent independent]} (split-by-driver where driver)
+               ;; Each half must keep the variables the OTHER half joins on,
+               ;; and those are not necessarily in :find. IC08's join key is
+               ;; ?msg, which appears in no output column -- pruning base down
+               ;; to :find erased it, leaving a single empty binding that
+               ;; matched everything and admitted replies to other people's
+               ;; messages. Caught by the LDBC answers-agree gate, not by the
+               ;; unit tests, because every fixture there happened to name its
+               ;; join keys in :find.
+               dep-needed (into #{} (mapcat clause-lvars) independent)
+               base-needed (into (clause-lvars clause)
+                                 (mapcat clause-lvars) dependent)
+               base (run-clauses #{initial-binding} independent db visible?
+                                 extension-for clause-cardinality find prune? base-needed)
+               values (sort (if desc? #(compare %2 %1) compare)
+                            (arr/values-for-predicate db attr))]
+           (order+limit
+            (reduce (fn [rows v]
+                      (if (>= (count rows) limit)
+                        (reduced rows)
+                        (let [seed (into #{}
+                                         (map (fn [{:keys [s]}]
+                                                (assoc initial-binding subject-var s key-var v)))
+                                         (scan* db [nil attr v] visible?))
+                              bs (run-clauses seed dependent db visible?
+                                              extension-for clause-cardinality find prune?
+                                              dep-needed)]
+                          (into rows (project (join-bindings bs base) find)))))
+                    #{} values)
+            find order-by limit))
+         (let [bindings (run-clauses #{initial-binding} (vec where) db visible?
+                                     extension-for clause-cardinality find prune? #{})]
+           (order+limit (project bindings find) find order-by limit)))))))
