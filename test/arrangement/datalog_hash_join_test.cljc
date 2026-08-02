@@ -100,3 +100,20 @@
   (let [db (social 30)
         [keyed hashed] (both-ways db two-hop '{[?msg "creator" ?f2] 60} ["p0"])]
     (is (= keyed hashed))))
+
+(deftest skipping-the-group-by-does-not-change-an-answer
+  ;; When every binding substitutes to its own pattern the grouping buys
+  ;; nothing and is skipped. That path has to return exactly what the grouped
+  ;; path would -- it is the same scans, just not routed through a map.
+  ;; Fixture: each ?f reaches exactly one distinct pattern, which is the
+  ;; shape LDBC IC02 has and the shape that regressed.
+  (let [db (db-of (concat
+                   (for [i (range 50)] [(str "p" i) "knows" (str "q" i)])
+                   (for [i (range 50)] [(str "m" i) "creator" (str "q" i)])))
+        query '{:find [?f ?m]
+                :where [[?p "knows" ?f] [?m "creator" ?f]]}
+        grouped (d/q db (assoc query :clause-cardinality '{[?m "creator" ?f] 50})
+                     everything [])
+        ungrouped (d/q db query everything [])]
+    (is (= 50 (count ungrouped)) "one distinct pattern per binding, nothing to dedup")
+    (is (= grouped ungrouped))))
