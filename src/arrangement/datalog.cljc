@@ -621,6 +621,39 @@
 (defn- agg-fn [x] (get aggregate-fns (first x)))
 (defn- agg-var [x] (second x))
 
+(defn- form-lvars
+  "Every logic variable anywhere in `form`, at any nesting depth. Deliberately
+  structural rather than clause-aware: a triple, a `not`, an `or-join`, a
+  function call and a rule invocation all just contain symbols, and
+  over-approximating (keeping a variable that turns out not to be needed) is
+  always safe while under-approximating drops a binding a later clause was
+  going to join on."
+  [form]
+  (cond
+    (lvar? form) #{form}
+    (coll? form) (into #{} (mapcat form-lvars) form)
+    :else #{}))
+
+(defn- prune-bindings
+  "Drop variables no remaining clause and no output needs.
+
+  A binding set is a set, so removing a column MERGES bindings that differed
+  only in it. That is the point: measured (kotobase-peer
+  bench/results/2026-08-02-ic02-diagnosis.edn), LDBC IC09 carried 55,335
+  bindings into a step that only ever used 8,130 distinct values of one
+  variable -- the other 47,000 existed solely because two earlier variables
+  were still along for the ride, and every one of them cost a substitution, a
+  scan or a hash lookup, and a unification.
+
+  `needed` must include every variable of every REMAINING clause (including
+  ones nested in `or`/`not`/rule invocations) plus every `:find` element, or
+  this silently deletes a join key."
+  [bindings needed]
+  (if (or (empty? bindings)
+          (every? needed (keys (first bindings))))
+    bindings
+    (into #{} (map #(select-keys % needed)) bindings)))
+
 (defn- project
   "`bindings` -> `:find`-ordered rows. With no aggregate `:find` elements,
   this is the original per-binding projection (a plain set of tuples, one
@@ -779,9 +812,20 @@
      (doseq [[_ defs] parsed-rules] (doseq [{:keys [body]} defs] (check-clause-safety! body)))
      (check-unknown-rules! all-clauses parsed-rules)
      (let [full (fixpoint db visible? parsed-rules)
-           bindings (reduce (fn [bindings clause]
-                              (join-clause bindings clause db visible? #(get full % #{})
-                                           clause-cardinality))
+           ;; With an aggregate in :find, binding MULTIPLICITY is observable --
+           ;; `project` computes each aggregate over the bindings in its group,
+           ;; so two bindings differing only in a column nobody reads are two
+           ;; rows to `(count ?x)`. Pruning would merge them and change the
+           ;; answer, so it is off entirely in that case rather than
+           ;; conditionally per column.
+           prune? (not (some agg-find? find))
+           bindings (reduce (fn [bindings [i clause]]
+                              (let [bs (join-clause bindings clause db visible?
+                                                    #(get full % #{}) clause-cardinality)]
+                                (if prune?
+                                  (prune-bindings bs (into (form-lvars find)
+                                                           (form-lvars (subvec (vec where) (inc i)))))
+                                  bs)))
                             #{initial-binding}
-                            where)]
+                            (map-indexed vector where))]
        (order+limit (project bindings find) find order-by limit)))))
