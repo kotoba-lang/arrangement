@@ -482,28 +482,8 @@
       ;; caller that did not plan) this stays on the keyed path, which is the
       ;; safe default -- a broad scan of a large relation is exactly the
       ;; mistake the budget exists to avoid.
-      (cond
-        (and card (<= card (* hash-join-row-budget (count groups))))
+      (if (and card (<= card (* hash-join-row-budget (count groups))))
         (hash-join-rows groups clause db visible?)
-
-        ;; Every binding substituted to its own pattern, so the group-by
-        ;; bought nothing: it built a map with one entry per binding and each
-        ;; group still gets its own scan. Measured regression (kotobase-peer
-        ;; bench/results/2026-08-02-ldbc-snb-after-join-work.edn): LDBC IC02
-        ;; went from 7.7x to 14.7x of Neo4j after batching, because its
-        ;; hasCreator step has one distinct key per binding and is also above
-        ;; the hash budget -- it paid the grouping and collected neither win.
-        ;; The batching win is exactly the ratio of bindings to distinct
-        ;; patterns, so when that ratio is 1 there is nothing to collect.
-        (= (count groups) (count bindings))
-        (into #{}
-              (mapcat (fn [binding]
-                        (let [pattern (mapv #(substitute % binding) clause)]
-                          (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
-                                (scan* db pattern visible?)))))
-              bindings)
-
-        :else
         (into #{}
               (mapcat (fn [[pattern group]]
                         (let [rows (scan* db pattern visible?)]
