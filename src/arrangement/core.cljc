@@ -76,14 +76,6 @@
   "All subjects `s` where `[s p o]` holds (AVET-style point lookup)."
   [db p o] (get-in db [:pos p o] #{}))
 
-(defn values-for-predicate
-  "Distinct object values asserted for predicate `p`, in no particular order
-  (`:pos` is a hash map). Exposed so a query can DRIVE an ordered scan from a
-  clause's value position -- sorting these and walking them is bounded by the
-  number of distinct values, where joining every row that carries them is
-  bounded by the number of rows."
-  [db p] (keys (get (:pos db) p {})))
-
 (defn refs-to
   "All `{p #{s...}}` referencing object `o` (VAET-style reverse lookup) --
   only populated for quads asserted with a truthy `ref?`."
