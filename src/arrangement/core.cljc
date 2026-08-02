@@ -414,11 +414,23 @@
                                    (-> (encrypt-fn (v/encode-value t))
                                        (.then (fn [ct] [(pr-str blinded) ct])))))))
                     (vec (triples-for index)))
+                   ;; `pt/insert-many` is SYNCHRONOUS on both hosts -- unlike
+                   ;; `scan-prefix`, prolly-tree ships no async variant of the
+                   ;; incremental write path. This branch used to `.then` its
+                   ;; result, which is why `commit-delta!` had never once run on
+                   ;; ClojureScript: for an empty index with no previous root
+                   ;; `insert-many` returns nil, and `(.then nil ...)` throws
+                   ;; `Cannot read properties of null (reading 'then')`. With a
+                   ;; non-empty index it returns a CID string and `.then` is not
+                   ;; a function. Either way the cljs path could not complete.
+                   ;;
+                   ;; The blind/encrypt results above ARE promises, so entries
+                   ;; must still be awaited -- that is what this `.then` is for.
+                   ;; What must not be awaited is the tree write itself.
                    (.then (fn [entries]
-                            (-> (pt/insert-many put! get-fn
-                                                (prev-root snapshot name)
-                                                (vec entries))
-                                (.then (fn [root] [name (->link root)])))))))
+                            [name (->link (pt/insert-many put! get-fn
+                                                          (prev-root snapshot name)
+                                                          (vec entries)))]))))
              index-names)
             (.then (fn [pairs]
                      (ipld/put-node! put! {"schema-version" schema-version
