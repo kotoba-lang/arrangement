@@ -16,12 +16,22 @@
 (defn- db-of [quads]
   (reduce (fn [db [s p o]] (qs/assert-quad db {:s s :p p :o o})) (qs/empty-db) quads))
 
+(defn- pad4
+  "Zero-pad to width 4. `format` is Clojure-only and this file is `.cljc`:
+  under ClojureScript it is not merely absent from the reader's view, it does
+  not exist at runtime -- which is why every test in this namespace errored on
+  the cljs job while the JVM job failed at lint. Same reason `prolly-tree`'s
+  test helpers build their fixed-width keys by hand."
+  [n]
+  (let [s (str n)]
+    (str (subs "0000" 0 (max 0 (- 4 (count s)))) s)))
+
 (defn- social [n]
   (db-of (concat
           (for [i (range n) delta [1 2]] [(str "p" i) "knows" (str "p" (mod (+ i delta) n))])
           (for [i (range n) m [0 1]] [(str "m" i "-" m) "creator" (str "p" i)])
           ;; zero-padded so string order is date order
-          (for [i (range n) m [0 1]] [(str "m" i "-" m) "date" (format "%04d" (+ (* i 10) m))]))))
+          (for [i (range n) m [0 1]] [(str "m" i "-" m) "date" (pad4 (+ (* i 10) m))]))))
 
 (def ^:private recent
   '{:find [?f ?msg ?date]
