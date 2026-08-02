@@ -298,6 +298,62 @@
            initial-bound
            clauses)))
 
+(def ^:private hash-join-row-budget
+  "Prefer ONE broad scan plus an in-memory hash join over N keyed scans when
+  the clause's whole relation is no larger than this multiple of N.
+
+  Both sides of that comparison are real costs. A keyed scan is cheap per row
+  but has a fixed cost per call -- and over `datom.source/IPatternSource` it
+  may be a network round trip -- so N of them is N fixed costs. A broad scan
+  is one fixed cost and `card` rows. Below the budget the single scan wins.
+
+  4 is where the measured workload sits on either side without being near the
+  line (kotobase-peer bench/results/2026-08-01-ic09-diagnosis.edn, LDBC SNB
+  SF1 subset): `[?msg \"hasCreator\" ?f2]` is 7,355 rows against <=9,892
+  distinct keys, so it hashes; `[?f1 \"knows\" ?f2]` is 361,246 rows against
+  882 keys, so it does not -- and it must not, because that broad scan takes
+  a second on its own. A starting point chosen to put those two on opposite
+  sides, not a tuned constant."
+  4)
+
+(defn- broad-pattern
+  "The clause with every variable and wildcard nil -- its literal constants
+  only. Every substituted pattern for this clause is a specialization of it,
+  so one scan of this returns a superset of what all of them would."
+  [clause]
+  (mapv (fn [t] (if (or (lvar? t) (wildcard? t)) nil t)) clause))
+
+(defn- bound-positions
+  "Indices where a substituted pattern pinned a value the broad pattern left
+  open -- the columns a hash index for this pattern has to be keyed on."
+  [pattern clause]
+  (let [broad (broad-pattern clause)]
+    (into [] (keep-indexed (fn [i v] (when (and (some? v) (nil? (nth broad i))) i))) pattern)))
+
+(defn- hash-join-rows
+  "One broad scan, indexed by whichever columns the substituted patterns
+  pinned, then a lookup per distinct pattern. Groups whose patterns pin
+  DIFFERENT columns each get their own index -- that only happens when
+  bindings reaching this clause carry different variables (an `or` branch,
+  say), and it stays correct rather than needing to be excluded."
+  [groups clause db visible?]
+  (let [rows (into [] (map (fn [q] [(:s q) (:p q) (:o q)])) (scan* db (broad-pattern clause) visible?))
+        indexes (into {}
+                      (map (fn [positions]
+                             [positions (group-by (fn [r] (mapv #(nth r %) positions)) rows)]))
+                      (distinct (map (fn [[pattern _]] (bound-positions pattern clause)) groups)))]
+    (into #{}
+          (mapcat (fn [[pattern group]]
+                    (let [positions (bound-positions pattern clause)
+                          key (mapv #(nth pattern %) positions)
+                          matched (if (seq positions)
+                                    (get (get indexes positions) key)
+                                    rows)]
+                      (mapcat (fn [binding]
+                                (keep #(unify-positional binding clause %) matched))
+                              group))))
+          groups)))
+
 (declare join-clause)
 
 (defn- join-branch
@@ -305,12 +361,12 @@
   `(and ...)`, a single clause otherwise. Threading the bindings through the
   conjunction is what lets a branch bind a variable in one clause and constrain
   it in the next."
-  [bindings branch db visible? extension-for]
+  [bindings branch db visible? extension-for cardinality]
   (if (and-clause? branch)
-    (reduce (fn [bs c] (join-clause bs c db visible? extension-for))
+    (reduce (fn [bs c] (join-clause bs c db visible? extension-for cardinality))
             bindings
             (and-clauses branch))
-    (join-clause bindings branch db visible? extension-for)))
+    (join-clause bindings branch db visible? extension-for cardinality)))
 
 (defn- join-clause
   "One step of the join: for every binding so far,
@@ -336,7 +392,9 @@
   Triple and negation cases query through the same `visible?`-filtered
   `arrangement.query/query`, so a negation can never observe a fact
   `visible?` would hide (see the ns docstring)."
-  [bindings clause db visible? extension-for]
+  ([bindings clause db visible? extension-for]
+   (join-clause bindings clause db visible? extension-for nil))
+  ([bindings clause db visible? extension-for cardinality]
   (cond
     (not-clause? clause)
     (let [pattern (negated-pattern clause)]
@@ -369,7 +427,7 @@
         (into #{} (filter (fn [binding] (eval-fn-call binding fn-call))) bindings)))
 
     (or-clause? clause)
-    (into #{} (mapcat (fn [branch] (join-branch bindings branch db visible? extension-for)))
+    (into #{} (mapcat (fn [branch] (join-branch bindings branch db visible? extension-for cardinality)))
           (or-branches clause))
 
     (or-join-clause? clause)
@@ -385,7 +443,7 @@
                                                              (if (contains? extended v) (assoc b v (get extended v)) b))
                                                            binding
                                                            shared-vars)))
-                                            (join-branch #{binding} branch db visible? extension-for))))
+                                            (join-branch #{binding} branch db visible? extension-for cardinality))))
                             branches)))
             bindings))
 
@@ -406,15 +464,34 @@
     ;; row for row. This changes how often the source is asked, not what is
     ;; asked or what comes back -- which matters most for `IPatternSource`,
     ;; where every scan may be a network round trip.
-    (let [groups (group-by (fn [binding] (mapv #(substitute % binding) clause)) bindings)]
-      (into #{}
-            (mapcat (fn [[pattern group]]
-                      (let [rows (scan* db pattern visible?)]
-                        (mapcat (fn [binding]
-                                  (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
-                                        rows))
-                                group))))
-            groups))))
+    (let [groups (group-by (fn [binding] (mapv #(substitute % binding) clause)) bindings)
+          card (get cardinality clause)]
+      ;; ONE broad scan plus a hash join when the clause's whole relation is
+      ;; small relative to the number of keyed scans it would replace;
+      ;; otherwise a keyed scan per distinct pattern.
+      ;;
+      ;; Batching to one scan per distinct pattern (the previous change) took
+      ;; IC09's two-hop join from 35.6 s to 2.1 s, but left it index-nested-
+      ;; loop against Neo4j's 246 ms on the same data. The remaining shape is
+      ;; a step that issues thousands of keyed scans against a relation with
+      ;; only a few thousand rows in it -- reading the whole thing once is
+      ;; strictly less work than reading most of it in pieces.
+      ;;
+      ;; `cardinality` is the planner's own per-clause row estimate, which it
+      ;; already computes to order the clauses; without it (rule bodies, or a
+      ;; caller that did not plan) this stays on the keyed path, which is the
+      ;; safe default -- a broad scan of a large relation is exactly the
+      ;; mistake the budget exists to avoid.
+      (if (and card (<= card (* hash-join-row-budget (count groups))))
+        (hash-join-rows groups clause db visible?)
+        (into #{}
+              (mapcat (fn [[pattern group]]
+                        (let [rows (scan* db pattern visible?)]
+                          (mapcat (fn [binding]
+                                    (keep #(unify-positional binding clause [(:s %) (:p %) (:o %)])
+                                          rows))
+                                  group))))
+              groups))))))
 
 ;; ── recursive rules: parsing + semi-naive fixpoint ──────────────────────────
 
@@ -466,7 +543,8 @@
   (reduce
    (fn [bindings [i clause]]
      (join-clause bindings clause db visible?
-                  (fn [rname] (if (= i delta-idx) (get delta-map rname #{}) (get full-map rname #{})))))
+                  (fn [rname] (if (= i delta-idx) (get delta-map rname #{}) (get full-map rname #{})))
+                  nil))
    #{{}}
    (map-indexed vector body)))
 
@@ -674,6 +752,16 @@
   sequence. `:limit` without `:order-by` returns an unspecified subset --
   useful for probes, not for top-N.
 
+  `:clause-cardinality` (optional) is `{clause estimated-rows}` -- a
+  planner's own per-clause row estimate, which it already computes in
+  order to choose a clause order. When a clause's whole relation is small
+  relative to the number of keyed scans a join step would issue for it,
+  the executor reads that relation ONCE and hash-joins instead. Omit it
+  and every step stays on the keyed path, which is the safe default: a
+  broad scan of a large relation is the mistake the budget avoids, and a
+  hint that is absent is not a hint that is wrong. It never changes an
+  answer -- see `hash-join-rows` and the equivalence tests.
+
   These are applied to the finished projection: the join still does all
   of its work, so this makes top-N SAYABLE, not yet cheaper. Every LDBC
   SNB complex read is a \"most recent N\" query, and until this existed a
@@ -682,7 +770,7 @@
   exactly that, and said so). Pushing the limit into the join is a
   separate change -- see `order+limit`."
   ([db query visible?] (q db query visible? []))
-  ([db {:keys [find where rules in order-by limit]} visible? inputs]
+  ([db {:keys [find where rules in order-by limit clause-cardinality]} visible? inputs]
    (let [in-syms (vec (remove #{'$} (or in [])))
          initial-binding (into {} (map vector in-syms inputs))
          parsed-rules (parse-rules (or rules []))
@@ -692,7 +780,8 @@
      (check-unknown-rules! all-clauses parsed-rules)
      (let [full (fixpoint db visible? parsed-rules)
            bindings (reduce (fn [bindings clause]
-                              (join-clause bindings clause db visible? #(get full % #{})))
+                              (join-clause bindings clause db visible? #(get full % #{})
+                                           clause-cardinality))
                             #{initial-binding}
                             where)]
        (order+limit (project bindings find) find order-by limit)))))
