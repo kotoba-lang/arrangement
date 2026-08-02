@@ -1,19 +1,46 @@
 # arrangement
 
-`kotoba-lang/arrangement` is the shared CLJC home for an in-memory
-4-covering-index Arrangement (`spo`/`pso`/`pos`/`ocp` — Datomic's own term
-for exactly this structure; EAVT/AEVT/AVET/VAET in Datomic's own naming)
-plus CID-addressed commit snapshotting via `kotoba-lang/prolly-tree`, and
-the pattern-routing query layer over it.
+`kotoba-lang/arrangement` is the shared CLJC home for **persisting** an
+in-memory 4-covering-index Arrangement (`spo`/`pso`/`pos`/`ocp` — Datomic's
+own term for exactly this structure; EAVT/AEVT/AVET/VAET in Datomic's own
+naming): CID-addressed commit snapshotting via `kotoba-lang/prolly-tree`,
+blinded/encrypted leaves, incremental commits, partitioned roots, and
+cursor reads over the persisted trees.
+
+## The query layer lives in `kotoba-lang/datalog`
+
+The indexes, the pattern router and the Datalog engine are **not defined
+here**. They are [`kotoba-lang/datalog`](https://github.com/kotoba-lang/datalog)
+— `datalog.index`, `datalog.query`, `datalog.core` — and this repo depends
+on it.
+
+`arrangement.query` and `arrangement.datalog` still exist and still work:
+they are **compatibility shims** that delegate to `datalog.query` /
+`datalog.core`, and `arrangement.core` re-exports `datalog.index`'s four
+indexes with the `ipld.core/link?` default for `ref?` that this repo owns.
+No consumer had to change. Removing the shims is a follow-up, once callers
+require `datalog.*` directly.
+
+Why: both repos carried the same query layer, and two copies drift. They
+already did — arrangement kept developing while the extracted library sat
+20 commits stale, which cost a full re-extraction to discover. A shim over
+one copy cannot go stale; a second copy is what can.
+
+One thing does **not** re-point mechanically: `kotobase-peer`'s scan-count
+bench reaches into the private `#'arrangement.datalog/scan*` with
+`with-redefs`. A private var cannot be re-exported, and aliasing it would be
+worse than omitting it (the redef would rebind the alias while the engine
+kept calling the original, silently counting zero). That bench must point at
+`#'datalog.core/scan*`.
 
 Formerly two repos: `quad-store` (this one, renamed — it stores triples
 `{:s :p :o}`, not RDF quads; `Arrangement` names the actual structure
 instead of overloading `quad`, and aligns this substrate with Datomic
 terminology throughout, per `kotoba : kotobase = Clojure : Datomic`,
-ADR-2607032500) and `kqe` (Kotoba Query Engine, merged in here — a pure
-routing function over these indices with no storage of its own doesn't
-need its own repo). See `90-docs/adr/2607010930-clj-wgsl-migration.md`
-Phase 6 for the original landing, and ADR-2607050700 for the rename/merge.
+ADR-2607032500) and `kqe` (Kotoba Query Engine, merged in here — and since
+extracted again, into `datalog`, along with the rest of the query layer).
+See `90-docs/adr/2607010930-clj-wgsl-migration.md` Phase 6 for the original
+landing, and ADR-2607050700 for the rename/merge.
 
 A triple is `{:s subject :p predicate :o object}`. For this landing s/p/o
 are opaque strings — dag-cbor round-trips strings exactly but not e.g.
@@ -58,12 +85,10 @@ Link` value, which *is* recognized and preserved end to end — see
 - 4-index hot (in-memory) Arrangement: full CRUD via `assert-quad`/
   `retract-quad`, point/scan lookups via `entity-attrs`/`by-predicate`/
   `by-predicate-value`/`refs-to`, pattern query via `arrangement.query/
-  query` (routes `[s p o]` to whichever index matches the bound
-  positions).
-- `arrangement.datalog/q` — Datomic-shaped `{:find [?var ...] :where
-  [[e a v] ...]}` conjunctive multi-clause join over `arrangement.query`
-  (nested-loop join, variable binding/unification across clauses, `_`
-  wildcard). First stage of the staged Datalog roadmap below.
+  query`, and `arrangement.datalog/q`. **All of these are shims over
+  `kotoba-lang/datalog`** — see the section above. The behaviour they
+  document is that library's; what this repo still owns is the
+  `ipld.core/link?` default for `ref?`.
 - `commit!` snapshots each index to a `prolly-tree` and CID-addresses the
   commit as `{schema-version index-roots prev}` — a real commit chain,
   content-addressed (verified by test: same db+prev+schema-version always
@@ -82,10 +107,11 @@ Link` value, which *is* recognized and preserved end to end — see
   `kotoba-lang/kotobase-peer`'s `cold-datoms` for a filtered cold read
   that doesn't need one).
 - General typed values beyond string + `ipld.core/Link`.
-- Negation (`not` clauses), aggregation (`:with`/`count`/`sum` etc. in
-  `:find`), and recursive rules (`:rules` + naive/semi-naive fixpoint) on
-  top of `arrangement.datalog/q`'s conjunctive join — staged roadmap, see
-  the full-Datalog ADR.
+
+Query-language gaps are no longer this repo's to state — negation,
+aggregation, rules and the rest landed long ago and their current status
+(including what is still missing, like `not-join` and `pull`) is documented
+where the code is, in [`kotoba-lang/datalog`](https://github.com/kotoba-lang/datalog).
 
 ## Test
 

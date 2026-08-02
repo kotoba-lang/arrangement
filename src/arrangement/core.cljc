@@ -1,14 +1,17 @@
 (ns arrangement.core
-  "The in-memory, 4-covering-index Arrangement -- Datomic's own term for
-  this exact structure (`spo`/`pso`/`pos`/`ocp` here, EAVT/AEVT/AVET/VAET
-  in Datomic's vocabulary) -- plus CID-addressed commit snapshotting via
-  `prolly-tree.core`. Repo formerly `quad-store` (renamed: it stores
-  triples `{:s :p :o}`, not RDF quads -- `Arrangement` names the actual
-  structure instead of overloading `quad`, and aligns this whole substrate
-  with Datomic terminology per the design this org tracks kotoba : kotobase
-  = Clojure : Datomic against, ADR-2607032500). `arrangement.query` (this
-  same repo, formerly the standalone `kqe` repo) is the pattern-routing
-  query layer over the indices below.
+  "CID-addressed commit snapshotting of the 4-covering-index Arrangement, via
+  `prolly-tree.core`. Repo formerly `quad-store` (renamed: it stores triples
+  `{:s :p :o}`, not RDF quads -- `Arrangement` names the actual structure
+  instead of overloading `quad`, and aligns this whole substrate with Datomic
+  terminology per the design this org tracks kotoba : kotobase = Clojure :
+  Datomic against, ADR-2607032500).
+
+  **The indices themselves are no longer defined here.** They live in
+  `kotoba-lang/datalog`'s `datalog.index` -- `spo`/`pso`/`pos`/`ocp` here,
+  EAVT/AEVT/AVET/VAET in Datomic's vocabulary -- and this namespace
+  re-exports them below so existing callers keep working unchanged. This
+  repo owns the half that persists one: `commit!`, `restore`,
+  `commit-delta!`, and the blinded/encrypted leaf format they share.
 
   A triple is `{:s subject :p predicate :o object}`. s/p/o are still
   treated as opaque values for indexing purposes (general typed-value
@@ -23,63 +26,96 @@
   indexed in `ocp` for reverse-reference lookup when `ref?` (default:
   `ipld.core/link?`, ADR-2607023200 §6-4 -- \"ref? naturalizes to: is the
   value a Link\") says so; a caller can still pass a different predicate to
-  `assert-quad`/`retract-quad` to opt out or widen it."
-  (:require [prolly-tree.core :as pt]
+  `assert-quad`/`retract-quad` to opt out or widen it. Supplying that
+  default is now precisely this namespace's job: `datalog.index` requires
+  `ref?` explicitly, because that one default was the ONLY thing tying the
+  quad index to IPLD, and IPLD is what stayed here."
+  (:require [datalog.index :as index]
+            [prolly-tree.core :as pt]
             [ipld.core :as ipld]
             [ipld.value :as v]))
 
-(defn empty-db [] {:spo {} :pso {} :pos {} :ocp {}})
+;; ── The four covering indexes: re-exported from `datalog.index` ──────────────
+;;
+;; COMPATIBILITY SHIM. `arrangement.core`'s index functions are a PUBLIC
+;; surface with existing callers (`kotobase-peer`, `kotobase-query`,
+;; `kotoba-git`/`bonsai`, `kotoba-rad`/`nekko`, `loop-system-dynamics`,
+;; `net-kotobase`), so they keep resolving here and keep their arities,
+;; arglists and docstrings. What changed is where the code IS: exactly one
+;; copy, in `kotoba-lang/datalog`.
+;;
+;; This is a shim, not a home. Removing it is a follow-up, to be done once
+;; those consumers require `datalog.index` directly; the aliases below are
+;; deliberately mechanical and exhaustive -- every public var of
+;; `datalog.index`, in its declaration order -- so that "did we miss one" is
+;; answerable by reading rather than by testing.
+;;
+;; `assert-quad` and `retract-quad` additionally supply the `ref?` default
+;; (`ipld.core/link?`) that `datalog.index` requires explicitly. That default
+;; is the whole of what IPLD ever contributed to the index, which is why the
+;; split fell where it did.
+;;
+;; These are `defn` wrappers rather than `(def x index/x)` aliases for a
+;; reason found by the test suite, not guessed: ClojureScript's analyzer
+;; computes `:arglists` for a `def` from its init expression and OVERWRITES a
+;; declared one, so an aliased var reports `()` as its signature on cljs
+;; while reporting the right thing on the JVM. Docstrings survive; arglists
+;; do not. A caller reading `(doc arr/entity-attrs)` in a cljs REPL would
+;; have seen the shim, which is exactly what a compatibility shim must not
+;; do. A wrapper costs one call and reads identically on both runtimes.
 
-(defn- upd [m k1 k2 v]
-  (update m k1 (fnil (fn [m2] (update m2 k2 (fnil conj #{}) v)) {})))
+(defn empty-db
+  "A db with all four indices empty. Just a map -- nothing to close, nothing
+  to open, safe to hold in an atom or thread through pure functions.
 
-(defn- rm [m k1 k2 v]
-  (if-let [m2 (get m k1)]
-    (let [s (disj (get m2 k2 #{}) v)]
-      (if (empty? s)
-        (let [m2' (dissoc m2 k2)]
-          (if (empty? m2') (dissoc m k1) (assoc m k1 m2')))
-        (assoc m k1 (assoc m2 k2 s))))
-    m))
+  Delegates to `datalog.index/empty-db`."
+  []
+  (index/empty-db))
 
 (defn assert-quad
   "Add `{:s :p :o}` to `db`'s 4 indices. `ref?` (default: `ipld.core/link?`)
   decides whether `:o` is also indexed in `:ocp` for reverse-reference
-  lookup."
-  ([db q] (assert-quad db q ipld/link?))
-  ([db {:keys [s p o]} ref?]
-   (cond-> db
-     true     (update :spo upd s p o)
-     true     (update :pso upd p s o)
-     true     (update :pos upd p o s)
-     (ref? o) (update :ocp upd o p s))))
+  lookup.
+
+  Delegates to `datalog.index/assert-quad`, supplying the `ipld.core/link?`
+  default that namespace deliberately refuses to guess at."
+  ([db q] (index/assert-quad db q ipld/link?))
+  ([db q ref?] (index/assert-quad db q ref?)))
 
 (defn retract-quad
-  "Remove `{:s :p :o}` from `db`'s 4 indices."
-  ([db q] (retract-quad db q ipld/link?))
-  ([db {:keys [s p o]} ref?]
-   (cond-> db
-     true     (update :spo rm s p o)
-     true     (update :pso rm p s o)
-     true     (update :pos rm p o s)
-     (ref? o) (update :ocp rm o p s))))
+  "Remove `{:s :p :o}` from `db`'s 4 indices. `ref?` (default:
+  `ipld.core/link?`) must agree with the one used to assert the same quad,
+  otherwise the `:ocp` entry is left behind.
+
+  Delegates to `datalog.index/retract-quad`, supplying the `ipld.core/link?`
+  default that namespace deliberately refuses to guess at."
+  ([db q] (index/retract-quad db q ipld/link?))
+  ([db q ref?] (index/retract-quad db q ref?)))
 
 (defn entity-attrs
-  "All `{p #{o...}}` for subject `s` (EAVT-style)."
-  [db s] (get (:spo db) s {}))
+  "All `{p #{o...}}` for subject `s` (EAVT-style).
+
+  Delegates to `datalog.index/entity-attrs`."
+  [db s] (index/entity-attrs db s))
 
 (defn by-predicate
-  "All `{s #{o...}}` for predicate `p` (AEVT-style scan)."
-  [db p] (get (:pso db) p {}))
+  "All `{s #{o...}}` for predicate `p` (AEVT-style scan).
+
+  Delegates to `datalog.index/by-predicate`."
+  [db p] (index/by-predicate db p))
 
 (defn by-predicate-value
-  "All subjects `s` where `[s p o]` holds (AVET-style point lookup)."
-  [db p o] (get-in db [:pos p o] #{}))
+  "All subjects `s` where `[s p o]` holds (AVET-style point lookup).
+
+  Delegates to `datalog.index/by-predicate-value`."
+  [db p o] (index/by-predicate-value db p o))
 
 (defn refs-to
   "All `{p #{s...}}` referencing object `o` (VAET-style reverse lookup) --
-  only populated for quads asserted with a truthy `ref?`."
-  [db o] (get (:ocp db) o {}))
+  only populated for quads asserted with a truthy `ref?`.
+
+  Delegates to `datalog.index/refs-to`."
+  [db o] (index/refs-to db o))
 
 ;; ── Link <-> EDN-safe round-trip ─────────────────────────────────────────────
 ;; `ipld.core/Link` is a bare deftype with no reader/print-method (by design --
@@ -302,8 +338,14 @@
   that WROTE it, never reinterpreted under the current one. Returns a db on
   clj and a Promise of a db on cljs."
   [get-fn snapshot-cid decrypt-fn]
+  ;; Note the `index/` calls: the persistence half reaches DOWN into
+  ;; `datalog.index` directly rather than through the compat shim above, so
+  ;; that removing the shim one day is a deletion and not a rewrite. This --
+  ;; `index/assert-quad` and `index/empty-db` -- is the whole of what the
+  ;; persistence half needs from the index half, which is why the split was
+  ;; cheap enough to be worth making.
   (if (nil? snapshot-cid)
-    #?(:clj (empty-db) :cljs (js/Promise.resolve (empty-db)))
+    #?(:clj (index/empty-db) :cljs (js/Promise.resolve (index/empty-db)))
     (let [snapshot (ipld/decode (get-fn snapshot-cid))
           schema-version (get snapshot "schema-version")
           _ (when-not (contains? supported-schema-versions schema-version)
@@ -322,8 +364,9 @@
           root-cid (some-> (get-in snapshot ["index-roots" "spo"]) ipld/link-cid)
           entries (if root-cid (pt/scan-prefix get-fn root-cid "") [])
           build (fn [triples]
-                  (reduce (fn [db [s p o]] (assert-quad db {:s s :p p :o o}))
-                          (empty-db)
+                  (reduce (fn [db [s p o]]
+                            (index/assert-quad db {:s s :p p :o o} ipld/link?))
+                          (index/empty-db)
                           triples))]
       #?(:clj
          (build (map (fn [[_ ciphertext]] (decode-leaf (decrypt-fn ciphertext)))
