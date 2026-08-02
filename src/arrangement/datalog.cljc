@@ -74,7 +74,8 @@
   (generalized negation over a multi-clause conjunction with explicit
   variable scoping, vs. today's single-triple `not`) is deliberately NOT
   included here -- a further follow-up, not a hidden gap."
-  (:require [arrangement.query :as query]
+  (:require [arrangement.core :as arr]
+            [arrangement.query :as query]
             [arrangement.source :as source]
             [datom.source :as ds]
             [clojure.string :as str]
@@ -747,6 +748,56 @@
                     (vec rows))]
       (if limit (vec (take limit ordered)) ordered))))
 
+(defn- plain-triple?
+  "A positive `[e a v]` clause -- not a `not`, `or`, `or-join`, rule
+  invocation, or function/predicate call. Those are seq-shaped or shorter;
+  a plain triple is a 3-vector whose first position is not a call form."
+  [clause]
+  (and (vector? clause) (= 3 (count clause)) (not (seq? (first clause)))))
+
+(defn- run-clauses
+  "Fold `clauses` over `bindings`, pruning between steps exactly as `q` does.
+  Extracted so the ordered-driver path below runs the REMAINING clauses through
+  the same code as the ordinary path -- a second copy of the join loop is how
+  the two would drift."
+  [bindings clauses db visible? extension-for cardinality find prune?]
+  (reduce (fn [bs [i clause]]
+            (let [bs' (join-clause bs clause db visible? extension-for cardinality)]
+              (if prune?
+                (prune-bindings bs' (into (form-lvars find)
+                                          (form-lvars (subvec (vec clauses) (inc i)))))
+                bs')))
+          bindings
+          (map-indexed vector clauses)))
+
+(defn- ordered-driver
+  "The clause an ordered scan can be driven from, as
+  `{:clause .. :attr .. :subject-var .. :key-var .. :desc? ..}`, or nil.
+
+  Requirements, each one load-bearing:
+  - a `:limit`, and an `:order-by` whose FIRST key is a plain variable (later
+    keys only break ties inside a value group, which this always drains whole);
+  - that variable is bound by exactly ONE `:where` clause -- otherwise the
+    value a group fixes is not the value the row sorts by;
+  - in that clause's VALUE position, with a literal attribute and a variable
+    subject, so `:pos` can enumerate the distinct values;
+  - every `:where` clause is a plain triple. A `not`/`or`/rule/function clause
+    can bind or reject in ways this scan cannot reason about in value order.
+
+  When any of these fails the caller runs the ordinary path, which is always
+  correct and never slower than it was."
+  [where find order-by limit]
+  (when (and limit (seq order-by) (every? plain-triple? where))
+    (let [k (let [e (first order-by)] (if (vector? e) (first e) e))
+          desc? (let [e (first order-by)] (and (vector? e) (= :desc (second e))))]
+      (when (and (lvar? k) (some #{k} find))
+        (let [carriers (filter (fn [[_ a v]] (and (= v k) (string? a))) where)]
+          (when (and (= 1 (count carriers))
+                     (= 1 (count (filter (fn [c] (contains? (clause-lvars c) k)) where))))
+            (let [[sv a _] (first carriers)]
+              (when (lvar? sv)
+                {:clause (first carriers) :attr a :subject-var sv :key-var k :desc? desc?}))))))))
+
 (defn q
   "`{:find [?var ...] :in [?param ...] :where [[e a v] ...] :rules [...]}`
   over `db`. `visible?` is required and threaded into every underlying
@@ -812,6 +863,7 @@
      (doseq [[_ defs] parsed-rules] (doseq [{:keys [body]} defs] (check-clause-safety! body)))
      (check-unknown-rules! all-clauses parsed-rules)
      (let [full (fixpoint db visible? parsed-rules)
+           extension-for #(get full % #{})
            ;; With an aggregate in :find, binding MULTIPLICITY is observable --
            ;; `project` computes each aggregate over the bindings in its group,
            ;; so two bindings differing only in a column nobody reads are two
@@ -819,13 +871,39 @@
            ;; answer, so it is off entirely in that case rather than
            ;; conditionally per column.
            prune? (not (some agg-find? find))
-           bindings (reduce (fn [bindings [i clause]]
-                              (let [bs (join-clause bindings clause db visible?
-                                                    #(get full % #{}) clause-cardinality)]
-                                (if prune?
-                                  (prune-bindings bs (into (form-lvars find)
-                                                           (form-lvars (subvec (vec where) (inc i)))))
-                                  bs)))
-                            #{initial-binding}
-                            (map-indexed vector where))]
-       (order+limit (project bindings find) find order-by limit)))))
+           driver (when prune? (ordered-driver where find order-by limit))]
+       (if driver
+         ;; ORDERED DRIVE. Walk the driver clause's distinct values in sort
+         ;; order, join each value's rows through the remaining clauses, and
+         ;; stop once `limit` distinct output rows exist. Sound because every
+         ;; row produced from a value group sorts by that value, groups are
+         ;; walked in order, and a group is always drained whole -- so once
+         ;; `limit` rows are in hand, nothing unvisited can outrank them, and
+         ;; secondary sort keys only reorder within a group already complete.
+         ;;
+         ;; Why it is worth the branch: measured (kotobase-peer
+         ;; bench/results/2026-08-02-ldbc-snb-after-join-work.edn), LDBC IC02
+         ;; matches 910 of 7,355 messages, so a date-ordered walk stopping at
+         ;; 20 touches roughly 160 rows instead of joining all 7,355 -- and
+         ;; every LDBC SNB complex read is a most-recent-N query.
+         (let [{:keys [clause attr subject-var key-var desc?]} driver
+               rest-clauses (vec (remove #{clause} where))
+               values (sort (if desc? #(compare %2 %1) compare)
+                            (arr/values-for-predicate db attr))
+               enough? (fn [rows] (>= (count rows) limit))]
+           (order+limit
+            (reduce (fn [rows v]
+                      (if (enough? rows)
+                        (reduced rows)
+                        (let [seed (into #{}
+                                         (map (fn [{:keys [s]}]
+                                                (assoc initial-binding subject-var s key-var v)))
+                                         (scan* db [nil attr v] visible?))
+                              bs (run-clauses seed rest-clauses db visible?
+                                              extension-for clause-cardinality find prune?)]
+                          (into rows (project bs find)))))
+                    #{} values)
+            find order-by limit))
+         (let [bindings (run-clauses #{initial-binding} (vec where) db visible?
+                                     extension-for clause-cardinality find prune?)]
+           (order+limit (project bindings find) find order-by limit)))))))
