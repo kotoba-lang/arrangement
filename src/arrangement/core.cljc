@@ -414,25 +414,42 @@
                                    (-> (encrypt-fn (v/encode-value t))
                                        (.then (fn [ct] [(pr-str blinded) ct])))))))
                     (vec (triples-for index)))
-                   ;; `pt/insert-many` is SYNCHRONOUS on both hosts -- unlike
-                   ;; `scan-prefix`, prolly-tree ships no async variant of the
-                   ;; incremental write path. This branch used to `.then` its
-                   ;; result, which is why `commit-delta!` had never once run on
-                   ;; ClojureScript: for an empty index with no previous root
-                   ;; `insert-many` returns nil, and `(.then nil ...)` throws
-                   ;; `Cannot read properties of null (reading 'then')`. With a
-                   ;; non-empty index it returns a CID string and `.then` is not
-                   ;; a function. Either way the cljs path could not complete.
+                   ;; `insert-many-async`, and the await is the point.
                    ;;
-                   ;; The blind/encrypt results above ARE promises, so entries
-                   ;; must still be awaited -- that is what this `.then` is for.
-                   ;; What must not be awaited is the tree write itself.
+                   ;; This line has now been wrong in two different ways. It
+                   ;; originally `.then`ed the SYNCHRONOUS `pt/insert-many` --
+                   ;; written as though an async variant existed when none did
+                   ;; -- so `commit-delta!` had never once run on
+                   ;; ClojureScript: an empty index with no previous root
+                   ;; returns nil and `(.then nil ...)` throws, a non-empty one
+                   ;; returns a CID string whose `.then` is not a function.
+                   ;; That was fixed by calling it synchronously, which
+                   ;; completed but left a second defect: `insert-many` ignores
+                   ;; what `put!` returns, so on a Worker store -- the only
+                   ;; place this branch runs -- the blocks were never waited
+                   ;; on, and the commit node naming them could be published
+                   ;; while they were still in flight.
+                   ;;
+                   ;; `prolly-tree` grew `insert-many-async` for exactly this,
+                   ;; so the shape the original author reached for is now the
+                   ;; correct one: await the tree write before linking its root.
                    (.then (fn [entries]
-                            [name (->link (pt/insert-many put! get-fn
-                                                          (prev-root snapshot name)
-                                                          (vec entries)))]))))
+                            (-> (pt/insert-many-async put! get-fn
+                                                      (prev-root snapshot name)
+                                                      (vec entries))
+                                (.then (fn [root] [name (->link root)])))))))
              index-names)
+            ;; The commit node's OWN write has to be awaited too, and
+            ;; `ipld/put-node!` cannot do it: it calls `(put! cid bytes)` and
+            ;; discards the result to return the cid, which is right for the
+            ;; synchronous port it was written against and drops the promise
+            ;; here. Awaiting the index roots while letting the node that
+            ;; names them race would fix the smaller half of the problem and
+            ;; leave the published head pointing at a block in flight.
             (.then (fn [pairs]
-                     (ipld/put-node! put! {"schema-version" schema-version
-                                           "index-roots" (into {} pairs)
-                                           "prev" (->link prev-commit-cid)}))))))))
+                     (let [{:keys [cid bytes]}
+                           (ipld/node->block {"schema-version" schema-version
+                                              "index-roots" (into {} pairs)
+                                              "prev" (->link prev-commit-cid)})]
+                       (-> (js/Promise.resolve (put! cid bytes))
+                           (.then (fn [_] cid)))))))))))

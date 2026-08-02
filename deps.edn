@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/prolly-tree {:git/sha "e91eefcd21a4c5302868e519659433385a020961"}
+ :deps {io.github.kotoba-lang/prolly-tree {:git/sha "9abe8fd19d309a2d056283e5bfeafe030e05e42a"}
         io.github.kotoba-lang/io-ipld {:git/sha "e08dc3b2ab705be292e388cd1ad136381544a041"}
         io.github.kotoba-lang/datom-source {:git/sha "32fd54f091348dab3c78bee765bb7214a056488d"}}
  :aliases
