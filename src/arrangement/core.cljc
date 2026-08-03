@@ -496,3 +496,85 @@
                                               "prev" (->link prev-commit-cid)})]
                        (-> (js/Promise.resolve (put! cid bytes))
                            (.then (fn [_] cid)))))))))))
+
+(defn commit-changes!
+  "Commit asserted and retracted quads on top of `prev-commit-cid` without a
+  full index rebuild.
+
+  `changes` is `{:assertions [...] :retractions [...]}`. Callers must collapse
+  repeated operations for the same logical quad to their final operation.
+  Retractions are applied first and assertions second, so the final operation
+  wins if a caller nevertheless supplies a quad in both collections.
+
+  The resulting snapshot is CID-identical to `commit!` of the resulting db.
+  This is the mixed-operation counterpart to assertion-only `commit-delta!`.
+  It uses Prolly's deterministic `delete-many`/`insert-many` primitives and
+  retains the JVM synchronous / ClojureScript Promise contract."
+  ([put! get-fn prev-commit-cid changes schema-version blind-fn encrypt-fn]
+   (commit-changes! put! get-fn prev-commit-cid changes schema-version
+                    blind-fn encrypt-fn ipld/link?))
+  ([put! get-fn prev-commit-cid {:keys [assertions retractions]}
+    schema-version blind-fn encrypt-fn ref?]
+   (let [snapshot (when prev-commit-cid (ipld/decode (get-fn prev-commit-cid)))
+         ->link #(some-> % ipld/link)
+         triples-for (fn [index quads]
+                       (keep #(index-triple index % ref?) quads))]
+     #?(:clj
+        (let [roots
+              (into {}
+                    (map
+                     (fn [[index name]]
+                       (let [additions
+                             (mapv (fn [t]
+                                     [(pr-str (mapv #(blind-fn (blind-input %)) t))
+                                      (encrypt-fn (v/encode-value t))])
+                                   (triples-for index assertions))
+                             removals
+                             (mapv (fn [t]
+                                     (pr-str (mapv #(blind-fn (blind-input %)) t)))
+                                   (triples-for index retractions))
+                             root (pt/mutate-many put! get-fn
+                                                  (prev-root snapshot name)
+                                                  additions removals)]
+                         [name (->link root)]))
+                     index-names))]
+          (ipld/put-node! put! {"schema-version" schema-version
+                                "index-roots" roots
+                                "prev" (->link prev-commit-cid)}))
+        :cljs
+        (-> (pmap-async
+             (fn [[index name]]
+               (let [addition-triples (vec (triples-for index assertions))
+                     retraction-triples (vec (triples-for index retractions))]
+                 (-> (js/Promise.all
+                      #js [(pmap-async
+                            (fn [t]
+                              (-> (pmap-async blind-fn (mapv blind-input t))
+                                  (.then
+                                   (fn [blinded]
+                                     (-> (encrypt-fn (v/encode-value t))
+                                         (.then (fn [ct] [(pr-str blinded) ct])))))))
+                            addition-triples)
+                           (pmap-async
+                            (fn [t]
+                              (-> (pmap-async blind-fn (mapv blind-input t))
+                                  (.then pr-str)))
+                            retraction-triples)])
+                     (.then
+                      (fn [prepared]
+                        (let [additions (aget prepared 0)
+                              removals (aget prepared 1)]
+                          (-> (pt/mutate-many-async
+                               put! get-fn (prev-root snapshot name)
+                               additions removals)
+                              (.then (fn [root]
+                                       [name (->link root)])))))))))
+             index-names)
+            (.then
+             (fn [pairs]
+               (let [{:keys [cid bytes]}
+                     (ipld/node->block {"schema-version" schema-version
+                                        "index-roots" (into {} pairs)
+                                        "prev" (->link prev-commit-cid)})]
+                 (-> (js/Promise.resolve (put! cid bytes))
+                     (.then (fn [_] cid)))))))))))

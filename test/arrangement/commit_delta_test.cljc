@@ -40,6 +40,9 @@
 (defn- db-of [quads]
   (reduce (fn [db q] (a/assert-quad db q)) (a/empty-db) quads))
 
+(defn- apply-changes [db assertions retractions]
+  (reduce a/assert-quad (reduce a/retract-quad db retractions) assertions))
+
 (defn- full-commit [quads prev]
   (let [{:keys [put!]} (store)]
     (a/commit! put! (db-of quads) prev a/current-schema-version
@@ -127,6 +130,33 @@
              (str "delta wrote " delta-blocks " blocks, a full commit wrote "
                   full-blocks))))))
 
+#?(:clj
+   (deftest mixed-changes-match-full-commit-and-avoid-full-rewrite
+     (let [base (mapv quad (range 2000))
+           retractions (mapv quad (range 900 920))
+           assertions (mapv quad (range 2000 2020))
+           expected-db (apply-changes (db-of base) assertions retractions)
+           {:keys [put! get-fn blocks]} (store)
+           base-cid (a/commit! put! (db-of base) nil a/current-schema-version
+                               blind-fn encrypt-fn)
+           before (count @blocks)
+           actual (a/commit-changes!
+                   put! get-fn base-cid
+                   {:assertions assertions :retractions retractions}
+                   a/current-schema-version blind-fn encrypt-fn)
+           delta-blocks (- (count @blocks) before)
+           full-store (store)
+           expected (a/commit! (:put! full-store) expected-db base-cid
+                               a/current-schema-version blind-fn encrypt-fn)
+           full-blocks (count @(:blocks full-store))]
+       (is (= expected actual)
+           "mixed delta and rebuild must name the same snapshot")
+       (is (= (:spo expected-db) (:spo (a/restore get-fn actual identity))))
+       (is (<= (* 4 delta-blocks) (* 3 full-blocks))
+           (str "mixed delta wrote " delta-blocks
+                " blocks; full commit wrote " full-blocks
+                " (expected at least 25% fewer)")))))
+
 ;; ── ClojureScript ───────────────────────────────────────────────────────────
 ;;
 ;; This test exists because `commit-delta!` had NEVER run on ClojureScript.
@@ -179,6 +209,33 @@
                         (done)))
                (.catch (fn [e]
                          (is false (str "cljs commit-delta! threw: " e))
+                         (done)))))))))
+
+#?(:cljs
+   (deftest cljs-mixed-changes-agree-with-a-full-commit
+     (testing "the async mixed delete/insert path is content-identical"
+       (async done
+         (let [base (mapv quad (range 120))
+               retractions (mapv quad (range 40 55))
+               assertions (mapv quad (range 120 135))
+               expected-db (apply-changes (db-of base) assertions retractions)
+               {:keys [put! get-fn]} (store)]
+           (-> (a/commit! put! (db-of base) nil a/current-schema-version
+                          blind-fn encrypt-fn)
+               (.then
+                (fn [base-cid]
+                  (js/Promise.all
+                   #js [(a/commit! put! expected-db base-cid
+                                   a/current-schema-version blind-fn encrypt-fn)
+                        (a/commit-changes!
+                         put! get-fn base-cid
+                         {:assertions assertions :retractions retractions}
+                         a/current-schema-version blind-fn encrypt-fn)])))
+               (.then (fn [pair]
+                        (is (= (aget pair 0) (aget pair 1)))
+                        (done)))
+               (.catch (fn [e]
+                         (is false (str "cljs mixed commit threw: " e))
                          (done)))))))))
 
 ;; ── the writes are awaited, not merely issued ───────────────────────────────
