@@ -515,12 +515,13 @@
                     blind-fn encrypt-fn ipld/link?))
   ([put! get-fn prev-commit-cid {:keys [assertions retractions]}
     schema-version blind-fn encrypt-fn ref?]
-   (let [snapshot (when prev-commit-cid (ipld/decode (get-fn prev-commit-cid)))
-         ->link #(some-> % ipld/link)
+   (let [->link #(some-> % ipld/link)
          triples-for (fn [index quads]
                        (keep #(index-triple index % ref?) quads))]
      #?(:clj
-        (let [roots
+        (let [snapshot (when prev-commit-cid
+                         (ipld/decode (get-fn prev-commit-cid)))
+              roots
               (into {}
                     (map
                      (fn [[index name]]
@@ -542,7 +543,13 @@
                                 "index-roots" roots
                                 "prev" (->link prev-commit-cid)}))
         :cljs
-        (-> (pmap-async
+        (-> (if prev-commit-cid
+              (-> (js/Promise.resolve (get-fn prev-commit-cid))
+                  (.then ipld/decode))
+              (js/Promise.resolve nil))
+            (.then
+             (fn [snapshot]
+               (-> (pmap-async
              (fn [[index name]]
                (let [addition-triples (vec (triples-for index assertions))
                      retraction-triples (vec (triples-for index retractions))]
@@ -569,12 +576,13 @@
                                additions removals)
                               (.then (fn [root]
                                        [name (->link root)])))))))))
-             index-names)
-            (.then
-             (fn [pairs]
-               (let [{:keys [cid bytes]}
-                     (ipld/node->block {"schema-version" schema-version
-                                        "index-roots" (into {} pairs)
-                                        "prev" (->link prev-commit-cid)})]
-                 (-> (js/Promise.resolve (put! cid bytes))
-                     (.then (fn [_] cid)))))))))))
+                    index-names)
+                   (.then
+                    (fn [pairs]
+                      (let [{:keys [cid bytes]}
+                            (ipld/node->block
+                             {"schema-version" schema-version
+                              "index-roots" (into {} pairs)
+                              "prev" (->link prev-commit-cid)})]
+                        (-> (js/Promise.resolve (put! cid bytes))
+                            (.then (fn [_] cid))))))))))))))

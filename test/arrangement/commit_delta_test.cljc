@@ -219,7 +219,9 @@
                retractions (mapv quad (range 40 55))
                assertions (mapv quad (range 120 135))
                expected-db (apply-changes (db-of base) assertions retractions)
-               {:keys [put! get-fn]} (store)]
+               {:keys [put! blocks]} (store)
+               async-get-fn (fn [cid]
+                              (js/Promise.resolve (get @blocks cid)))]
            (-> (a/commit! put! (db-of base) nil a/current-schema-version
                           blind-fn encrypt-fn)
                (.then
@@ -228,7 +230,7 @@
                    #js [(a/commit! put! expected-db base-cid
                                    a/current-schema-version blind-fn encrypt-fn)
                         (a/commit-changes!
-                         put! get-fn base-cid
+                         put! async-get-fn base-cid
                          {:assertions assertions :retractions retractions}
                          a/current-schema-version blind-fn encrypt-fn)])))
                (.then (fn [pair]
