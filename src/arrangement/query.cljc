@@ -41,3 +41,11 @@
   Delegates to `datalog.query/cardinality`."
   [db pattern visible?]
   (dq/cardinality db pattern visible?))
+
+(defn estimate-cardinality
+  "Cheap index-derived upper bound for planning. Unlike `cardinality`, this
+  does not invoke visibility filtering and may overestimate visible rows.
+
+  Delegates to `datalog.query/estimate-cardinality`."
+  [db pattern]
+  (dq/estimate-cardinality db pattern))
