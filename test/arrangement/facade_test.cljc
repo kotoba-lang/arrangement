@@ -79,6 +79,8 @@
   (is (= (index/by-predicate sample "role") (arr/by-predicate sample "role")))
   (is (= (index/by-predicate-value sample "role" "admin")
          (arr/by-predicate-value sample "role" "admin")))
+  (is (= (index/by-predicate-range sample "role" "a" "z")
+         (arr/by-predicate-range sample "role" "a" "z")))
   (is (= (index/refs-to sample "alice") (arr/refs-to sample "alice")))
   (testing "assert/retract add only the ref? default -- at arity 3 they must
             be indistinguishable from the underlying ones"
@@ -121,8 +123,10 @@
                   ["entity-attrs" #'arr/entity-attrs]
                   ["by-predicate" #'arr/by-predicate]
                   ["by-predicate-value" #'arr/by-predicate-value]
+                  ["by-predicate-range" #'arr/by-predicate-range]
                   ["refs-to" #'arr/refs-to]
                   ["query" #'q/query]
+                  ["query-range" #'q/query-range]
                   ["cardinality" #'q/cardinality]
                   ["q" #'dl/q]]]
     (let [m (meta v)]

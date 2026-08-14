@@ -49,7 +49,10 @@
 
 (defrecord ^:no-doc MaterializedSource [db]
   ds/IPatternSource
-  (-scan [_ pattern] (q/query db pattern (constantly true))))
+  (-scan [_ pattern] (q/query db pattern (constantly true)))
+  ds/IRangeSource
+  (-scan-range [_ attr lo hi opts]
+    (q/query-range db attr lo hi (constantly true) opts)))
 
 (defn materialized
   "A source over an already-hydrated db. Wrapping `arrangement.query/query`
@@ -119,7 +122,22 @@
                                 (and (or (nil? ps) (= ps s))
                                      (or (nil? pp) (= pp p))
                                      (or (nil? po) (= po o)))))))
-              (pt/scan-prefix get-fn root (key-prefix blind-fn values)))))))
+              (pt/scan-prefix get-fn root (key-prefix blind-fn values))))))
+  ds/IRangeSource
+  (-scan-range [_ attr lo hi opts]
+    ;; Blinded leaf keys are HMAC, not order-preserving, so a value interval
+    ;; cannot be pruned on the key. POS prefix of the attribute still is a
+    ;; prefix of the blinded token, then decrypt and `in-range?`. That is
+    ;; the honest cut this store can make.
+    (let [root (get roots "pos")]
+      (if (nil? root)
+        #{}
+        (into #{}
+              (comp (map (fn [[_ ciphertext]]
+                           (leaf->quad "pos" (v/decode-value (decrypt-fn ciphertext)))))
+                    (filter (fn [{:keys [p o]}]
+                              (and (= p attr) (ds/in-range? o lo hi opts)))))
+              (pt/scan-prefix get-fn root (key-prefix blind-fn [attr])))))))
 
 (defn snapshot-roots
   "The four index root CIDs of a `arrangement.core/commit!` snapshot."

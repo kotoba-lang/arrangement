@@ -76,3 +76,15 @@
            c (as/cursor get-fn cid wrong test-decrypt-fn)]
        (testing "a mismatched blind key is indistinguishable from an empty db"
          (is (empty? (ds/scan-set c [nil "knows" nil])))))))
+
+#?(:clj
+   (deftest cursor-and-materialized-agree-on-a-value-range
+     (let [{:keys [put! get-fn]} (mem-store)
+           quads (for [i (range 20)] {:s (str "p" i) :p "age" :o i})
+           m (as/materialized (reduce arr/assert-quad (arr/empty-db) quads))
+           c (as/cursor get-fn (commit-quads! put! quads)
+                        test-blind-fn test-decrypt-fn)
+           want (ds/scan-range m "age" 10 15)]
+       (is (= want (ds/scan-range c "age" 10 15)))
+       (is (= 5 (count want)) "[10, 15) is five ages")
+       (is (every? #(and (>= (:o %) 10) (< (:o %) 15)) want)))))
