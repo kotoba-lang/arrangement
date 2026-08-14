@@ -92,6 +92,29 @@
   ([db q] (index/retract-quad db q ipld/link?))
   ([db q ref?] (index/retract-quad db q ref?)))
 
+(defn mutable-db
+  "A mutable bulk-loading accumulator over `db`. Delegates to
+  `datalog.index/mutable-db`."
+  [db] (index/mutable-db db))
+
+(defn assert-quads!
+  "Add `quads` to a `mutable-db`. `ref?` defaults to `ipld.core/link?`.
+
+  Delegates to `datalog.index/assert-quads!`."
+  ([mdb quads] (index/assert-quads! mdb quads ipld/link?))
+  ([mdb quads ref?] (index/assert-quads! mdb quads ref?)))
+
+(defn persist-db
+  "Finish a `mutable-db`. Delegates to `datalog.index/persist-db`."
+  [mdb] (index/persist-db mdb))
+
+(defn assert-quads
+  "Bulk `assert-quad`. `ref?` defaults to `ipld.core/link?`.
+
+  Delegates to `datalog.index/assert-quads`."
+  ([db quads] (index/assert-quads db quads ipld/link?))
+  ([db quads ref?] (index/assert-quads db quads ref?)))
+
 (defn entity-attrs
   "All `{p #{o...}}` for subject `s` (EAVT-style).
 
@@ -109,6 +132,12 @@
 
   Delegates to `datalog.index/by-predicate-value`."
   [db p o] (index/by-predicate-value db p o))
+
+(defn by-predicate-range
+  "AVET-style value interval: `{s #{o...}}` for predicate `p` whose object
+  is in `[lo, hi)`. Delegates to `datalog.index/by-predicate-range`."
+  ([db p lo hi] (index/by-predicate-range db p lo hi))
+  ([db p lo hi opts] (index/by-predicate-range db p lo hi opts)))
 
 (defn refs-to
   "All `{p #{s...}}` referencing object `o` (VAET-style reverse lookup) --

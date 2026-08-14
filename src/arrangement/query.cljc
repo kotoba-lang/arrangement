@@ -34,6 +34,13 @@
   [db pattern visible?]
   (dq/query db pattern visible?))
 
+(defn query-range
+  "Quads of `attr` whose object is in `[lo, hi)` under `visible?`.
+
+  Delegates to `datalog.query/query-range`."
+  ([db attr lo hi visible?] (dq/query-range db attr lo hi visible?))
+  ([db attr lo hi visible? opts] (dq/query-range db attr lo hi visible? opts)))
+
 (defn cardinality
   "How many quads `pattern` matches under `visible?` -- the same number as
   `(count (query db pattern visible?))`, without building the set.
