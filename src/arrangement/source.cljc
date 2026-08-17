@@ -41,6 +41,7 @@
             [arrangement.core :as arr]
             [arrangement.query :as q]
             [arrangement.partitioned :as part]
+            [arrangement.range-index :as ri]
             [prolly-tree.core :as pt]
             [ipld.core :as ipld]
             [ipld.value :as v]))
@@ -105,7 +106,9 @@
 (defn- leaf->quad [index-name triple]
   (zipmap (index-order index-name) triple))
 
-(defrecord ^:no-doc CursorSource [get-fn roots blind-fn decrypt-fn]
+(declare scan-range-report)
+
+(defrecord ^:no-doc CursorSource [get-fn roots blind-fn decrypt-fn partitions]
   ds/IPatternSource
   (-scan [_ pattern]
     (let [[idx values] (plan pattern)
@@ -124,20 +127,8 @@
                                      (or (nil? po) (= po o)))))))
               (pt/scan-prefix get-fn root (key-prefix blind-fn values))))))
   ds/IRangeSource
-  (-scan-range [_ attr lo hi opts]
-    ;; Blinded leaf keys are HMAC, not order-preserving, so a value interval
-    ;; cannot be pruned on the key. POS prefix of the attribute still is a
-    ;; prefix of the blinded token, then decrypt and `in-range?`. That is
-    ;; the honest cut this store can make.
-    (let [root (get roots "pos")]
-      (if (nil? root)
-        #{}
-        (into #{}
-              (comp (map (fn [[_ ciphertext]]
-                           (leaf->quad "pos" (v/decode-value (decrypt-fn ciphertext)))))
-                    (filter (fn [{:keys [p o]}]
-                              (and (= p attr) (ds/in-range? o lo hi opts)))))
-              (pt/scan-prefix get-fn root (key-prefix blind-fn [attr])))))))
+  (-scan-range [this attr lo hi opts]
+    (:quads (scan-range-report this attr lo hi opts))))
 
 (defn snapshot-roots
   "The four index root CIDs of a `arrangement.core/commit!` snapshot."
@@ -146,7 +137,7 @@
     (let [node (ipld/decode (get-fn snapshot-cid))]
       (into {} (keep (fn [k] (when-let [l (get-in node ["index-roots" k])]
                                [k (ipld/link-cid l)])))
-            ["spo" "pso" "pos" "ocp"]))))
+            ["spo" "pso" "pos" "ocp" "range"]))))
 
 (defn cursor
   "A source that reads a persisted snapshot directly — no materialization.
@@ -159,8 +150,13 @@
   JVM-only for now: `decrypt-fn` is Promise-returning on cljs and the scan
   would have to be async all the way out, which changes the protocol's shape.
   Deliberately not faked with a synchronous stub."
-  [get-fn snapshot-cid blind-fn decrypt-fn]
-  (->CursorSource get-fn (or (snapshot-roots get-fn snapshot-cid) {}) blind-fn decrypt-fn))
+  ([get-fn snapshot-cid blind-fn decrypt-fn]
+   (cursor get-fn snapshot-cid blind-fn decrypt-fn nil))
+  ([get-fn snapshot-cid blind-fn decrypt-fn partitions]
+   (->CursorSource get-fn (or (snapshot-roots get-fn snapshot-cid) {})
+                   blind-fn decrypt-fn
+                   (into {} (map (juxt :attr identity))
+                         (map ri/validate-partition! partitions)))))
 
 ;; ── brick 2: compaction ──────────────────────────────────────────────
 ;; A partitioned root (ADR-2608011200) lets N writers commit without
@@ -198,3 +194,58 @@
   [put! get-fn root-cid blind-fn encrypt-fn decrypt-fn]
   (cursor get-fn (compact-root! put! get-fn root-cid blind-fn encrypt-fn decrypt-fn)
           blind-fn decrypt-fn))
+
+;; ── the range read, and whether it actually cut anything ────────────────────
+
+(defn scan-range-report
+  "`-scan-range`, plus whether the value interval was pruned or merely
+  filtered.
+
+  ```clojure
+  {:quads #{...} :pruned? true :buckets {:from 1 :to 2} :budget-bits 2}
+  ```
+
+  Two paths, and the whole point of the report is that a caller can tell them
+  apart:
+
+  - **Pruned.** The attribute has a declared partition and the snapshot
+    carries a range index, so the scan reads only the buckets the interval
+    touches. `:budget-bits` is what that costs in disclosure, carried here so
+    the number travels with the answer rather than living in a document.
+  - **Filtered.** No partition, or no range index in this snapshot. Falls back
+    to the attribute prefix in `pos` and `in-range?`. Blinded leaf keys are
+    HMAC, so they are not order-preserving and an interval cannot be pruned on
+    the key -- measured (superproject ADR-2608170400 P4-4): ten results and a
+    thousand cost byte for byte the same.
+
+  Before this existed the two were indistinguishable from the outside. That is
+  the failure this ADR keeps finding, and a range plane whose caller cannot
+  tell a cut from a scan has it by construction: the query looks selective,
+  the cost is not, and nothing says which."
+  [^CursorSource src attr lo hi opts]
+  (let [{:keys [get-fn roots blind-fn decrypt-fn partitions]} src
+        part (get partitions attr)
+        range-root (get roots "range")
+        decode (fn [[_ ciphertext]]
+                 (leaf->quad "pos" (v/decode-value (decrypt-fn ciphertext))))
+        keep? (fn [{:keys [p o]}] (and (= p attr) (ds/in-range? o lo hi opts)))]
+    (if (and part range-root)
+      (let [span (ri/buckets-for-range (:boundaries part) lo hi)]
+        (if (nil? span)
+          ;; an empty interval selects nothing and reads nothing
+          {:quads #{} :pruned? true :buckets nil :budget-bits (:budget-bits part)}
+          (let [[k-lo k-hi] (ri/key-bounds (blind-fn (arr/blind-input attr)) span)]
+            {:quads (into #{} (comp (map decode) (filter keep?))
+                          (pt/scan-range get-fn range-root k-lo k-hi))
+             :pruned? true
+             :buckets span
+             :budget-bits (:budget-bits part)})))
+      {:quads (if (nil? (get roots "pos"))
+                #{}
+                (into #{} (comp (map decode) (filter keep?))
+                      (pt/scan-prefix get-fn (get roots "pos")
+                                      (key-prefix blind-fn [attr]))))
+       :pruned? false
+       :buckets nil
+       :budget-bits 0})))
+\n

@@ -204,3 +204,78 @@
            (str "range " (:blocks narrow) " vs hydrate " (:blocks hydrate)))
        (is (>= (:bytes narrow) (:bytes hydrate))))))
 
+;; ── P4-5: what a declared partition buys, and what it discloses ─────────────
+
+#?(:clj
+   (def ^:private score-partition
+     {:attr "score" :boundaries ["v000250" "v000500" "v000750"] :budget-bits 2}))
+
+#?(:clj
+   (deftest a-declared-partition-turns-the-value-cut-back-on
+     ;; The same corpus P4-4 measured, committed WITH a range partition. There
+     ;; the narrow window and the unbounded one cost byte for byte the same;
+     ;; the only thing that changed is that someone stated a budget.
+     (let [{:keys [put! get-fn] :as store} (mem-store)
+           quads (concat (for [i (range 1000)]
+                           {:s (str "s" i) :p "score" :o (vkey i)})
+                         (for [i (range 20000)]
+                           {:s (str "t" i) :p "noise" :o (str "n" i)}))
+           cid (arr/commit! put! (reduce arr/assert-quad (arr/empty-db) quads)
+                            nil arr/current-schema-version
+                            test-blind-fn test-encrypt-fn [score-partition])
+           mk (fn [] (as/cursor get-fn cid test-blind-fn test-decrypt-fn
+                                [score-partition]))
+           narrow (cost store #(as/scan-range-report (mk) "score"
+                                                     (vkey 100) (vkey 110) {}))
+           whole (cost store #(as/scan-range-report (mk) "score" nil nil {}))]
+       (println (format "  [P4-5] partitioned: range(10) %d blocks/%d bytes | range(1000) %d/%d"
+                        (:blocks narrow) (:bytes narrow)
+                        (:blocks whole) (:bytes whole)))
+       (testing "it says it pruned, and says what that disclosed"
+         (is (true? (:pruned? (:result narrow))))
+         (is (= 2 (:budget-bits (:result narrow))))
+         (is (= {:from 0 :to 0} (:buckets (:result narrow)))
+             "[v000100, v000110) is inside the first bucket"))
+       (testing "and the narrow window now genuinely costs less"
+         (is (< (:blocks narrow) (:blocks whole))
+             (str "narrow " (:blocks narrow) " vs whole " (:blocks whole)))
+         (is (< (:bytes narrow) (:bytes whole))))
+       (testing "while returning exactly what the unpruned path returns"
+         ;; The oracle. A cut that is cheap because it lost rows is not a cut,
+         ;; and a smaller answer contains nothing that says it should have
+         ;; been bigger.
+         (let [unpruned (ds/scan-range
+                         (as/cursor get-fn cid test-blind-fn test-decrypt-fn)
+                         "score" (vkey 100) (vkey 110))]
+           (is (= 10 (count unpruned)))
+           (is (= unpruned (:quads (:result narrow)))))))))
+
+#?(:clj
+   (deftest without-a-declared-partition-nothing-changes-at-all
+     ;; Both halves of the compatibility claim, because either alone would let
+     ;; the other rot: a snapshot committed with no partitions must be
+     ;; BYTE-IDENTICAL to one from before this existed (fold convergence
+     ;; depends on identical state giving an identical CID), and a reader
+     ;; given no partition must still answer correctly against a snapshot that
+     ;; HAS a range index.
+     (let [{:keys [put! get-fn]} (mem-store)
+           quads (for [i (range 200)] {:s (str "s" i) :p "score" :o (vkey i)})
+           db (reduce arr/assert-quad (arr/empty-db) quads)
+           plain (arr/commit! put! db nil arr/current-schema-version
+                              test-blind-fn test-encrypt-fn)
+           also-plain (arr/commit! put! db nil arr/current-schema-version
+                                   test-blind-fn test-encrypt-fn nil)
+           ranged (arr/commit! put! db nil arr/current-schema-version
+                               test-blind-fn test-encrypt-fn [score-partition])]
+       (testing "no partitions means the identical snapshot CID"
+         (is (= plain also-plain)
+             "the 6- and 7-arg forms must agree when there is nothing to add"))
+       (testing "declaring one changes the snapshot, because it adds an index"
+         (is (not= plain ranged)))
+       (testing "a partition-less reader still answers over a ranged snapshot"
+         (let [c (as/cursor get-fn ranged test-blind-fn test-decrypt-fn)
+               r (as/scan-range-report c "score" (vkey 10) (vkey 20) {})]
+           (is (false? (:pruned? r)) "it did not prune, and it says so")
+           (is (= 0 (:budget-bits r)) "and it disclosed nothing")
+           (is (= 10 (count (:quads r))) "but it answered correctly"))))))
+\n
