@@ -32,6 +32,7 @@
   quad index to IPLD, and IPLD is what stayed here."
   (:require [datalog.index :as index]
             [prolly-tree.core :as pt]
+            [arrangement.range-index :as ri]
             [ipld.core :as ipld]
             [ipld.value :as v]))
 
@@ -292,6 +293,57 @@
             triples)
            (.then (fn [entries] (pt/build-tree put! (vec (sort-by first entries)))))))))
 
+(defn- range-index-root
+  "One prolly tree over the declared range partitions, or nil when there are
+  none.
+
+  Keys are `arrangement.range-index/leaf-key`: the bucket ordinal in clear,
+  every other component blinded. That clear ordinal IS the disclosure, and it
+  is budgeted and checked in `range-index` -- `validate-partition!` runs here,
+  on the write path, so an unstated or understated budget cannot reach a
+  block.
+
+  The value slot is the same AEAD ciphertext of `[p o s]` the `pos` index
+  writes, so a matched leaf decodes through the identical path.
+
+  Returns nil for no partitions, which is what keeps a snapshot committed
+  without them BYTE-IDENTICAL to one from before this existed. Fold
+  convergence (`kotobase-peer.core/fold!`) depends on identical state giving
+  an identical CID, so a range index that silently appeared in every snapshot
+  would break the property the deterministic nonce exists to protect."
+  [put! db partitions blind-fn encrypt-fn]
+  (when (seq partitions)
+    (let [ps (mapv ri/validate-partition! partitions)]
+      #?(:clj
+         (let [entries (sort-by
+                        first
+                        (for [{:keys [attr boundaries]} ps
+                              [o ss] (get (:pos db) attr)
+                              s ss]
+                          [(ri/leaf-key (blind-fn (blind-input attr))
+                                        (ri/bucket-of boundaries o)
+                                        (blind-fn (blind-input o))
+                                        (blind-fn (blind-input s)))
+                           (encrypt-fn (v/encode-value [attr o s]))]))]
+           (when (seq entries) (pt/build-tree put! (vec entries))))
+         :cljs
+         (let [triples (vec (for [{:keys [attr boundaries]} ps
+                                  [o ss] (get (:pos db) attr)
+                                  s ss]
+                              [attr o s (ri/bucket-of boundaries o)]))]
+           (if (empty? triples)
+             (js/Promise.resolve nil)
+             (-> (pmap-async
+                  (fn [[attr o s bucket]]
+                    (-> (pmap-async blind-fn (mapv blind-input [attr o s]))
+                        (.then (fn [[ba bo bs]]
+                                 (-> (encrypt-fn (v/encode-value [attr o s]))
+                                     (.then (fn [ct]
+                                              [(ri/leaf-key ba bucket bo bs) ct])))))))
+                  triples)
+                 (.then (fn [entries]
+                          (pt/build-tree put! (vec (sort-by first entries))))))))))))
+
 (def current-schema-version
   "The current `\"schema-version\"` value for this index shape
   (ADR-2607050500, \"Schema evolution\"). Not a hidden default -- `commit!`
@@ -335,24 +387,47 @@
   2026-07-06) and threaded unchanged to `index-root` for all 4 indices —
   see `index-root`'s docstring for their contract, including the
   synchronous-JVM/Promise-cljs platform split. Returns the commit CID
-  directly on JVM, a `js/Promise` of it on cljs."
-  [put! db prev schema-version blind-fn encrypt-fn]
-  (let [->link #(some-> % ipld/link)]          ; empty index -> nil root -> null
-    #?(:clj
-       (let [roots {"spo" (->link (index-root put! (:spo db) blind-fn encrypt-fn))
-                    "pso" (->link (index-root put! (:pso db) blind-fn encrypt-fn))
-                    "pos" (->link (index-root put! (:pos db) blind-fn encrypt-fn))
-                    "ocp" (->link (index-root put! (:ocp db) blind-fn encrypt-fn))}]
-         (ipld/put-node! put! {"schema-version" schema-version
-                               "index-roots" roots "prev" (->link prev)}))
-       :cljs
-       (-> (pmap-async (fn [k] (index-root put! (get db k) blind-fn encrypt-fn))
-                       [:spo :pso :pos :ocp])
-           (.then (fn [[spo pso pos ocp]]
-                    (ipld/put-node! put! {"schema-version" schema-version
-                                          "index-roots" {"spo" (->link spo) "pso" (->link pso)
-                                                         "pos" (->link pos) "ocp" (->link ocp)}
-                                          "prev" (->link prev)})))))))
+  directly on JVM, a `js/Promise` of it on cljs.
+
+  The 7-argument arity takes `partitions` -- declared range partitions (see
+  `arrangement.range-index`) -- and writes ONE extra tree under the
+  `\"range\"` index root. Passing nil or an empty sequence writes nothing and
+  produces a byte-identical snapshot to the 6-argument form, which is the
+  property that makes this backward compatible in both directions: an old
+  reader ignores an unknown root key, and a caller who declares no partition
+  gets exactly the bytes they got before. Nothing here is opt-out; a range
+  index exists only where someone stated a budget for it."
+  ([put! db prev schema-version blind-fn encrypt-fn]
+   (commit! put! db prev schema-version blind-fn encrypt-fn nil))
+  ([put! db prev schema-version blind-fn encrypt-fn partitions]
+   (let [->link #(some-> % ipld/link)]          ; empty index -> nil root -> null
+     #?(:clj
+        (let [roots (cond-> {"spo" (->link (index-root put! (:spo db) blind-fn encrypt-fn))
+                             "pso" (->link (index-root put! (:pso db) blind-fn encrypt-fn))
+                             "pos" (->link (index-root put! (:pos db) blind-fn encrypt-fn))
+                             "ocp" (->link (index-root put! (:ocp db) blind-fn encrypt-fn))}
+                      (seq partitions)
+                      (assoc "range"
+                             (->link (range-index-root put! db partitions
+                                                       blind-fn encrypt-fn))))]
+          (ipld/put-node! put! {"schema-version" schema-version
+                                "index-roots" roots "prev" (->link prev)}))
+        :cljs
+        (-> (pmap-async (fn [k] (index-root put! (get db k) blind-fn encrypt-fn))
+                        [:spo :pso :pos :ocp])
+            (.then (fn [[spo pso pos ocp]]
+                     (-> (if (seq partitions)
+                           (range-index-root put! db partitions blind-fn encrypt-fn)
+                           (js/Promise.resolve nil))
+                         (.then (fn [rng]
+                                  (ipld/put-node!
+                                   put!
+                                   {"schema-version" schema-version
+                                    "index-roots"
+                                    (cond-> {"spo" (->link spo) "pso" (->link pso)
+                                             "pos" (->link pos) "ocp" (->link ocp)}
+                                      (seq partitions) (assoc "range" (->link rng)))
+                                    "prev" (->link prev)})))))))))))
 
 (defn restore
   "Rebuild a complete in-memory arrangement from a snapshot produced by
