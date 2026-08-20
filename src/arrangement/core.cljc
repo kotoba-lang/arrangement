@@ -7,11 +7,34 @@
   Datomic against, ADR-2607032500).
 
   **The indices themselves are no longer defined here.** They live in
-  `kotoba-lang/datalog`'s `datalog.index` -- `spo`/`pso`/`pos`/`ocp` here,
-  EAVT/AEVT/AVET/VAET in Datomic's vocabulary -- and this namespace
-  re-exports them below so existing callers keep working unchanged. This
-  repo owns the half that persists one: `commit!`, `restore`,
-  `commit-delta!`, and the blinded/encrypted leaf format they share.
+  `kotoba-lang/datalog`'s `datalog.index` -- `:eavt`/`:aevt`/`:avet`/`:vaet`,
+  named for their sort orders -- and this namespace re-exports them below so
+  existing callers keep working unchanged. This repo owns the half that
+  persists one: `commit!`, `restore`, `commit-delta!`, and the
+  blinded/encrypted leaf format they share.
+
+  ## Two vocabularies, on purpose: in memory vs on the wire
+
+  The in-memory index keys were renamed to their sort orders on 2026-08-20
+  (`datalog` `a43dc1cf`). **The persisted `index-roots` keys were not.** A
+  snapshot still names its four roots by the strings spo, pso, pos, ocp,
+  and `arrangement.source` still reads them under those names.
+
+  That is not an oversight and not laziness. Those strings are inside the
+  dag-cbor block the commit CID is the hash of: renaming them changes the CID
+  of every snapshot of every graph. `kotobase-peer`'s fold convergence is
+  built on identical state producing an identical CID, so a fleet mid-upgrade
+  -- some writers on the old name, some on the new -- would write two CIDs for
+  one graph and diverge **without erroring**, which is the exact failure the
+  deterministic nonce exists to prevent.
+
+  The mechanism for changing it already exists and is `current-schema-version`
+  (whose docstring already says to bump it the day the 4-index shape changes
+  incompatibly, and to give readers a migration keyed on the old value). Doing
+  that is a decision with a migration attached, not a side effect of an
+  in-memory rename. Until someone makes it, the keyword-to-wire-name pairing
+  lives in exactly one place -- `index-names` below -- so there is one line to
+  change rather than a search.
 
   A triple is `{:s subject :p predicate :o object}`. s/p/o are still
   treated as opaque values for indexing purposes (general typed-value
@@ -23,7 +46,7 @@
   `edn->link` on read).
 
   `:o` values that are references to other entities are additionally
-  indexed in `ocp` for reverse-reference lookup when `ref?` (default:
+  indexed in `:vaet` for reverse-reference lookup when `ref?` (default:
   `ipld.core/link?`, ADR-2607023200 §6-4 -- \"ref? naturalizes to: is the
   value a Link\") says so; a caller can still pass a different predicate to
   `assert-quad`/`retract-quad` to opt out or widen it. Supplying that
@@ -75,7 +98,7 @@
 
 (defn assert-quad
   "Add `{:s :p :o}` to `db`'s 4 indices. `ref?` (default: `ipld.core/link?`)
-  decides whether `:o` is also indexed in `:ocp` for reverse-reference
+  decides whether `:o` is also indexed in `:vaet` for reverse-reference
   lookup.
 
   Delegates to `datalog.index/assert-quad`, supplying the `ipld.core/link?`
@@ -86,7 +109,7 @@
 (defn retract-quad
   "Remove `{:s :p :o}` from `db`'s 4 indices. `ref?` (default:
   `ipld.core/link?`) must agree with the one used to assert the same quad,
-  otherwise the `:ocp` entry is left behind.
+  otherwise the `:vaet` entry is left behind.
 
   Delegates to `datalog.index/retract-quad`, supplying the `ipld.core/link?`
   default that namespace deliberately refuses to guess at."
@@ -141,11 +164,28 @@
   ([db p lo hi opts] (index/by-predicate-range db p lo hi opts)))
 
 (defn refs-to
-  "All `{p #{s...}}` referencing object `o` (VAET-style reverse lookup) --
+  "All `{p #{s...}}` referencing object `o` -- the `:vaet` reverse lookup;
   only populated for quads asserted with a truthy `ref?`.
 
   Delegates to `datalog.index/refs-to`."
   [db o] (index/refs-to db o))
+
+(defn legacy-db?
+  "True if `db` still carries the pre-rename index keys `:spo`/`:pso`/`:pos`/
+  `:ocp` instead of `:eavt`/`:aevt`/`:avet`/`:vaet`.
+
+  Delegates to `datalog.index/legacy-db?`. Note this asks about the IN-MEMORY
+  keys; a snapshot's persisted `index-roots` still use the old strings at
+  `current-schema-version` 2 and are not what this detects (see the ns
+  docstring)."
+  [db] (index/legacy-db? db))
+
+(defn check-shape!
+  "Throw if `db` is a pre-rename db rather than letting the renamed key read
+  as `nil` and a query answer zero rows successfully.
+
+  Delegates to `datalog.index/check-shape!`."
+  [db] (index/check-shape! db))
 
 ;; ── Link <-> EDN-safe round-trip ─────────────────────────────────────────────
 ;; `ipld.core/Link` is a bare deftype with no reader/print-method (by design --
@@ -303,7 +343,7 @@
   on the write path, so an unstated or understated budget cannot reach a
   block.
 
-  The value slot is the same AEAD ciphertext of `[p o s]` the `pos` index
+  The value slot is the same AEAD ciphertext of `[p o s]` the pos index
   writes, so a matched leaf decodes through the identical path.
 
   Returns nil for no partitions, which is what keeps a snapshot committed
@@ -318,7 +358,7 @@
          (let [entries (sort-by
                         first
                         (for [{:keys [attr boundaries]} ps
-                              [o ss] (get (:pos db) attr)
+                              [o ss] (get (:avet db) attr)
                               s ss]
                           [(ri/leaf-key (blind-fn (blind-input attr))
                                         (ri/bucket-of boundaries o)
@@ -328,7 +368,7 @@
            (when (seq entries) (pt/build-tree put! (vec entries))))
          :cljs
          (let [triples (vec (for [{:keys [attr boundaries]} ps
-                                  [o ss] (get (:pos db) attr)
+                                  [o ss] (get (:avet db) attr)
                                   s ss]
                               [attr o s (ri/bucket-of boundaries o)]))]
            (if (empty? triples)
@@ -402,10 +442,10 @@
   ([put! db prev schema-version blind-fn encrypt-fn partitions]
    (let [->link #(some-> % ipld/link)]          ; empty index -> nil root -> null
      #?(:clj
-        (let [roots (cond-> {"spo" (->link (index-root put! (:spo db) blind-fn encrypt-fn))
-                             "pso" (->link (index-root put! (:pso db) blind-fn encrypt-fn))
-                             "pos" (->link (index-root put! (:pos db) blind-fn encrypt-fn))
-                             "ocp" (->link (index-root put! (:ocp db) blind-fn encrypt-fn))}
+        (let [roots (cond-> {"spo" (->link (index-root put! (:eavt db) blind-fn encrypt-fn))
+                             "pso" (->link (index-root put! (:aevt db) blind-fn encrypt-fn))
+                             "pos" (->link (index-root put! (:avet db) blind-fn encrypt-fn))
+                             "ocp" (->link (index-root put! (:vaet db) blind-fn encrypt-fn))}
                       (seq partitions)
                       (assoc "range"
                              (->link (range-index-root put! db partitions
@@ -414,8 +454,8 @@
                                 "index-roots" roots "prev" (->link prev)}))
         :cljs
         (-> (pmap-async (fn [k] (index-root put! (get db k) blind-fn encrypt-fn))
-                        [:spo :pso :pos :ocp])
-            (.then (fn [[spo pso pos ocp]]
+                        [:eavt :aevt :avet :vaet])
+            (.then (fn [[eavt aevt avet vaet]]
                      (-> (if (seq partitions)
                            (range-index-root put! db partitions blind-fn encrypt-fn)
                            (js/Promise.resolve nil))
@@ -424,14 +464,15 @@
                                    put!
                                    {"schema-version" schema-version
                                     "index-roots"
-                                    (cond-> {"spo" (->link spo) "pso" (->link pso)
-                                             "pos" (->link pos) "ocp" (->link ocp)}
+                                    (cond-> {"spo" (->link eavt) "pso" (->link aevt)
+                                             "pos" (->link avet) "ocp" (->link vaet)}
                                       (seq partitions) (assoc "range" (->link rng)))
                                     "prev" (->link prev)})))))))))))
 
 (defn restore
   "Rebuild a complete in-memory arrangement from a snapshot produced by
-  `commit!`. Reads only the persisted `spo` covering index and derives the
+  `commit!`. Reads only the persisted spo covering index (the wire name of
+  `:eavt` -- see the ns docstring) and derives the
   other three indexes by re-asserting every recovered triple. `get-fn` is
   `(fn [cid] bytes)` and `decrypt-fn` is the inverse of the encrypt function
   supplied to `commit!` (synchronous on clj, Promise-returning on cljs).
@@ -491,13 +532,21 @@
   a delta commit stops matching a full one and the tests below say so."
   [index {:keys [s p o]} ref?]
   (case index
-    :spo [s p o]
-    :pso [p s o]
-    :pos [p o s]
-    :ocp (when (ref? o) [o p s])))
+    :eavt [s p o]
+    :aevt [p s o]
+    :avet [p o s]
+    :vaet (when (ref? o) [o p s])))
 
 (def ^:private index-names
-  [[:spo "spo"] [:pso "pso"] [:pos "pos"] [:ocp "ocp"]])
+  "In-memory index keyword -> the name it is stored under in a snapshot's
+  `index-roots` map.
+
+  The left column is `datalog.index`'s vocabulary; the right column is the
+  wire, frozen at `current-schema-version` 2 because those strings are hashed
+  into the commit CID. See the ns docstring for why the two are allowed to
+  differ. This vector is the only place the two meet -- if the wire names ever
+  move, they move here and in `arrangement.source`, behind a version bump."
+  [[:eavt "spo"] [:aevt "pso"] [:avet "pos"] [:vaet "ocp"]])
 
 (defn- prev-root
   "Root CID of one index in a previously committed snapshot, or nil."
@@ -526,7 +575,7 @@
 
   `prev-commit-cid` nil commits the quads as a first snapshot. `quads` is a
   seq of `{:s :p :o}`. `ref?` (default `ipld.core/link?`) decides whether `:o`
-  is also indexed in `:ocp`, matching `assert-quad`. `get-fn` reads blocks;
+  is also indexed in `:vaet`, matching `assert-quad`. `get-fn` reads blocks;
   everything else matches `commit!`'s contract, including its
   synchronous-JVM / Promise-cljs split."
   ([put! get-fn prev-commit-cid quads schema-version blind-fn encrypt-fn]

@@ -76,9 +76,9 @@
 ;; ── merging partitions back into one queryable db ────────────────────
 
 (defn db->quads
-  "Every `{:s :p :o}` in `db`, read off the `:spo` covering index."
+  "Every `{:s :p :o}` in `db`, read off the `:eavt` covering index."
   [db]
-  (for [[s pm] (:spo db) [p os] pm o os] {:s s :p p :o o}))
+  (for [[s pm] (:eavt db) [p os] pm o os] {:s s :p p :o o}))
 
 (defn merge-dbs
   "Union of several dbs as one db. Set-valued indices make this associative

@@ -107,8 +107,8 @@
              cid (a/commit-delta! put! get-fn nil quads a/current-schema-version
                                   blind-fn encrypt-fn)
              restored (a/restore get-fn cid identity)]
-         (is (= (:spo (db-of quads)) (:spo restored)))
-         (is (= (:pos (db-of quads)) (:pos restored)))))))
+         (is (= (:eavt (db-of quads)) (:eavt restored)))
+         (is (= (:avet (db-of quads)) (:avet restored)))))))
 
 #?(:clj
    (deftest delta-writes-far-fewer-blocks-than-a-full-commit
@@ -151,7 +151,7 @@
            full-blocks (count @(:blocks full-store))]
        (is (= expected actual)
            "mixed delta and rebuild must name the same snapshot")
-       (is (= (:spo expected-db) (:spo (a/restore get-fn actual identity))))
+       (is (= (:eavt expected-db) (:eavt (a/restore get-fn actual identity))))
        (is (<= (* 4 delta-blocks) (* 3 full-blocks))
            (str "mixed delta wrote " delta-blocks
                 " blocks; full commit wrote " full-blocks

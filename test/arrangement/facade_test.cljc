@@ -92,9 +92,9 @@
 ;; ── 3. the arity datalog.index dropped ──────────────────────────────────────
 
 (deftest arity-2-defaults-ref?-to-ipld-link?
-  (testing "a plain value is not a ref, so :ocp stays empty"
+  (testing "a plain value is not a ref, so :vaet stays empty"
     (let [db (arr/assert-quad (arr/empty-db) {:s "a" :p "knows" :o "b"})]
-      (is (= {} (:ocp db)))
+      (is (= {} (:vaet db)))
       (is (= {} (arr/refs-to db "b")))))
   (testing "an ipld Link IS a ref, without the caller saying so"
     (let [link (ipld/link "bafytest")

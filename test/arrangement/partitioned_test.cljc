@@ -51,10 +51,10 @@
        (testing "the merged view holds exactly the same facts"
          (is (= (set (part/db->quads single)) (set (part/db->quads merged)))))
        (testing "all four indices agree, not just the covering one"
-         (is (= (:spo single) (:spo merged)))
-         (is (= (:pso single) (:pso merged)))
-         (is (= (:pos single) (:pos merged)))
-         (is (= (:ocp single) (:ocp merged))))
+         (is (= (:eavt single) (:eavt merged)))
+         (is (= (:aevt single) (:aevt merged)))
+         (is (= (:avet single) (:avet merged)))
+         (is (= (:vaet single) (:vaet merged))))
        (testing "a query that CROSSES partitions returns the same answer --
                 this is the property sharding would have destroyed"
          ;; \"which addresses paid 100\" spans the base and arbitrum writers

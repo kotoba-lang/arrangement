@@ -1,11 +1,25 @@
 # arrangement
 
 `kotoba-lang/arrangement` is the shared CLJC home for **persisting** an
-in-memory 4-covering-index Arrangement (`spo`/`pso`/`pos`/`ocp` — Datomic's
-own term for exactly this structure; EAVT/AEVT/AVET/VAET in Datomic's own
-naming): CID-addressed commit snapshotting via `kotoba-lang/prolly-tree`,
-blinded/encrypted leaves, incremental commits, partitioned roots, and
-cursor reads over the persisted trees.
+in-memory 4-covering-index Arrangement (`:eavt`/`:aevt`/`:avet`/`:vaet`, named
+for their sort orders): CID-addressed commit snapshotting via
+`kotoba-lang/prolly-tree`, blinded/encrypted leaves, incremental commits,
+partitioned roots, and cursor reads over the persisted trees.
+
+### Two vocabularies, on purpose
+
+The in-memory keys were renamed from `:spo`/`:pso`/`:pos`/`:ocp` on
+2026-08-20. **A snapshot's `index-roots` still names its four roots spo, pso,
+pos, ocp** — those strings are hashed into the commit CID, so renaming them
+would rename every snapshot of every graph, and a fleet with writers on both
+sides would produce two CIDs for one graph and diverge without erroring.
+
+Changing them is a `current-schema-version` bump with a migration attached,
+not a side effect of an in-memory rename. The pairing lives in one place
+(`arrangement.core/index-names`), and
+`snapshot-bytes-are-unchanged-by-the-in-memory-rename` pins the commit CID of
+a fixed fixture to the literal measured on `d1ef17e`, the commit before the
+rename.
 
 ## The query layer lives in `kotoba-lang/datalog`
 
