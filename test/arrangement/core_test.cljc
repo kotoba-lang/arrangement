@@ -529,7 +529,7 @@
      to obtain genuine old bytes."
      [put! db]
      (let [entries (sort-by first
-                            (for [[a m2] (:spo db) [b os] m2 o os
+                            (for [[a m2] (:eavt db) [b os] m2 o os
                                   :let [a' (qs/link->edn a) b' (qs/link->edn b)
                                         o' (qs/link->edn o)]]
                               [(pr-str [(test-blind-fn a') (test-blind-fn b') (test-blind-fn o')])
@@ -642,3 +642,36 @@
        (is (= 99 (:actual thrown)))
        (is (= #{1 2} qs/supported-schema-versions))
        (is (= 2 qs/current-schema-version)))))
+
+;; ── The in-memory rename must not reach the wire ────────────────────────────
+;; The four index keys became :eavt/:aevt/:avet/:vaet on 2026-08-20. The four
+;; names INSIDE a snapshot did not, because they are hashed into the commit
+;; CID: renaming them would give every graph a new name, and a fleet with
+;; writers on both sides would produce two CIDs for one graph and diverge
+;; without erroring.
+;;
+;; The literal below was measured on kotoba-lang/main d1ef17e -- the commit
+;; BEFORE the rename -- by committing exactly this fixture. It is written out
+;; rather than computed so that this test cannot agree with a regression.
+
+#?(:clj
+   (deftest snapshot-bytes-are-unchanged-by-the-in-memory-rename
+     (let [{:keys [put! get-fn store]} (mem-store)
+           db (reduce (fn [d q] (qs/assert-quad d q))
+                      (qs/empty-db)
+                      [{:s "alice" :p "role"  :o "admin"}
+                       {:s "alice" :p "name"  :o "Alice"}
+                       {:s "bob"   :p "role"  :o "user"}
+                       {:s "carol" :p "knows" :o "alice"}
+                       {:s "dave"  :p "age"   :o 41}])
+           cid (qs/commit! put! db nil qs/current-schema-version
+                           test-blind-fn test-encrypt-fn)]
+       (testing "the commit CID is the one the pre-rename code produced"
+         (is (= "bafyreidegazchntq6w7qpfula72xzgawa4ae7hcysohzhydgrb3xzmabda" cid))
+         (is (= 4 (count @store))))
+       (testing "and the roots are still named by the wire vocabulary"
+         (is (= ["ocp" "pos" "pso" "spo"]
+                (sort (keys (get (ipld/decode (get-fn cid)) "index-roots"))))))
+       (testing "which the in-memory db no longer uses"
+         (is (= [:aevt :avet :eavt :vaet] (sort (keys db))))
+         (is (not (qs/legacy-db? db)))))))
