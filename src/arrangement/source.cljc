@@ -158,6 +158,127 @@
                    (into {} (map (juxt :attr identity))
                          (map ri/validate-partition! partitions)))))
 
+#?(:cljs
+   (do
+     (defrecord ^:no-doc AsyncCursorSource
+         [get-fn roots blind-fn decrypt-fn partitions])
+
+     (defn snapshot-roots-async
+       "Promise-returning counterpart to `snapshot-roots` for Worker/R2/HTTP
+       block getters. The snapshot bytes are awaited once; index roots remain
+       lazy and are fetched only by `scan-async` or
+       `scan-range-report-async`."
+       [get-fn snapshot-cid]
+       (if-not snapshot-cid
+         (js/Promise.resolve {})
+         (-> (js/Promise.resolve (get-fn snapshot-cid))
+             (.then (fn [bytes]
+                      (let [node (ipld/decode bytes)]
+                        (into {} (keep (fn [k]
+                                        (when-let [l (get-in node ["index-roots" k])]
+                                          [k (ipld/link-cid l)])))
+                              ["spo" "pso" "pos" "ocp" "range"])))))))
+
+     (defn cursor-async
+       "Open a Worker-native Promise cursor over a persisted snapshot.
+
+       `get-fn`, `blind-fn`, and `decrypt-fn` may all return Promises. Opening
+       awaits and decodes only the snapshot block. Every tree descent is done
+       by prolly-tree's bounded-concurrency async scanner, without a
+       synchronous miss trampoline or retry-from-root loop.
+
+       Returns `Promise<AsyncCursorSource>`."
+       ([get-fn snapshot-cid blind-fn decrypt-fn]
+        (cursor-async get-fn snapshot-cid blind-fn decrypt-fn nil))
+       ([get-fn snapshot-cid blind-fn decrypt-fn partitions]
+        (-> (snapshot-roots-async get-fn snapshot-cid)
+            (.then (fn [roots]
+                     (->AsyncCursorSource
+                      get-fn roots blind-fn decrypt-fn
+                      (into {} (map (juxt :attr identity))
+                            (map ri/validate-partition! partitions))))))))
+
+     (defn- async-prefix [blind-fn values]
+       (if (empty? values)
+         (js/Promise.resolve "")
+         (-> (js/Promise.all
+              (into-array
+               (map (fn [value]
+                      (-> (js/Promise.resolve
+                           (blind-fn (arr/blind-input value)))
+                          (.then pr-str)))
+                    values)))
+             (.then (fn [tokens]
+                      (str "[" (str/join " " (js->clj tokens))
+                           (when (< (count values) 3) " ")))))))
+
+     (defn- decrypt-entries-async [decrypt-fn idx entries]
+       (-> (js/Promise.all
+            (into-array
+             (map (fn [[_ ciphertext]]
+                    (-> (js/Promise.resolve (decrypt-fn ciphertext))
+                        (.then (fn [plaintext]
+                                 (leaf->quad idx (v/decode-value plaintext))))))
+                  entries)))
+           (.then #(vec (js->clj % :keywordize-keys true)))))
+
+     (defn scan-async
+       "Promise-returning pattern scan over an `AsyncCursorSource`.
+
+       The same index plan and post-filter as synchronous `CursorSource` are
+       used. Only the prefix-relevant tree branches are fetched, with child
+       requests bounded and concurrent in `prolly-tree/scan-prefix-async`."
+       [src pattern]
+       (let [{:keys [get-fn roots blind-fn decrypt-fn]} src
+             [idx values] (plan pattern)
+             root (get roots idx)]
+         (if-not root
+           (js/Promise.resolve #{})
+           (-> (async-prefix blind-fn values)
+               (.then #(pt/scan-prefix-async get-fn root %))
+               (.then #(decrypt-entries-async decrypt-fn idx %))
+               (.then (fn [quads]
+                        (let [[ps pp po] pattern]
+                          (into #{}
+                                (filter (fn [{:keys [s p o]}]
+                                          (and (or (nil? ps) (= ps s))
+                                               (or (nil? pp) (= pp p))
+                                               (or (nil? po) (= po o)))))
+                                quads))))))))
+
+     (defn scan-range-report-async
+       "Promise-returning counterpart to `scan-range-report`. Uses the
+       persisted range tree when the attribute has a declared partition;
+       otherwise performs the same honest attribute-prefix fallback."
+       ([src attr lo hi]
+        (scan-range-report-async src attr lo hi {}))
+       ([src attr lo hi opts]
+        (let [{:keys [get-fn roots blind-fn decrypt-fn partitions]} src
+              part (get partitions attr)
+              range-root (get roots "range")
+              keep? (fn [{:keys [p o]}]
+                      (and (= p attr) (ds/in-range? o lo hi opts)))]
+          (if (and part range-root)
+            (let [span (ri/buckets-for-range (:boundaries part) lo hi)]
+              (if-not span
+                (js/Promise.resolve
+                 {:quads #{} :pruned? true :buckets nil
+                  :budget-bits (:budget-bits part)})
+                (-> (js/Promise.resolve (blind-fn (arr/blind-input attr)))
+                    (.then (fn [blinded]
+                             (let [[k-lo k-hi] (ri/key-bounds blinded span)]
+                               (pt/scan-range-async get-fn range-root k-lo k-hi))))
+                    (.then #(decrypt-entries-async decrypt-fn "pos" %))
+                    (.then (fn [quads]
+                             {:quads (into #{} (filter keep?) quads)
+                              :pruned? true :buckets {:from (first span)
+                                                      :to (second span)}
+                              :budget-bits (:budget-bits part)})))))
+            (-> (scan-async src [nil attr nil])
+                (.then (fn [quads]
+                         {:quads (into #{} (filter keep?) quads)
+                          :pruned? false :buckets nil :budget-bits nil})))))))))
+
 ;; ── brick 2: compaction ──────────────────────────────────────────────
 ;; A partitioned root (ADR-2608011200) lets N writers commit without
 ;; contending, and `datom.source/merged` reads it back as one plane. But a
