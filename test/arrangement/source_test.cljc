@@ -3,6 +3,7 @@
   what says so. JVM-only for the same reason the commit/restore tests are:
   the crypto fixtures are synchronous only on clj."
   (:require [clojure.test :refer [deftest is testing]]
+            #?(:cljs [cljs.test :refer [async]])
             [datom.source :as ds]
             [datom.source.conformance :as conf]
             [arrangement.core :as arr]
@@ -278,4 +279,37 @@
            (is (false? (:pruned? r)) "it did not prune, and it says so")
            (is (= 0 (:budget-bits r)) "and it disclosed nothing")
            (is (= 10 (count (:quads r))) "but it answered correctly"))))))
+
+#?(:cljs
+   (deftest worker-native-cursor-awaits-blocks-blinding-and-decryption
+     (async done
+       (let [blocks (atom {})
+             reads (atom [])
+             put! (fn [cid bytes]
+                    (swap! blocks assoc cid bytes)
+                    (js/Promise.resolve cid))
+             get-async (fn [cid]
+                         (swap! reads conj cid)
+                         (js/Promise.resolve (get @blocks cid)))
+             quads [{:s "s1" :p "kind" :o "rare"}
+                    {:s "s2" :p "kind" :o "common"}
+                    {:s "s3" :p "noise" :o "value"}]]
+         (-> (arr/commit! put! (reduce arr/assert-quad (arr/empty-db) quads)
+                          nil arr/current-schema-version
+                          test-blind-fn test-encrypt-fn)
+             (.then (fn [snapshot-cid]
+                      (as/cursor-async get-async snapshot-cid
+                                       test-blind-fn test-decrypt-fn)))
+             (.then (fn [cursor]
+                      (as/scan-async cursor [nil "kind" nil])))
+             (.then (fn [got]
+                      (is (= #{{:s "s1" :p "kind" :o "rare"}
+                               {:s "s2" :p "kind" :o "common"}}
+                             got))
+                      (is (< (count (set @reads)) (count @blocks))
+                          "the Promise cursor does not hydrate every index")
+                      (done)))
+             (.catch (fn [e]
+                       (is false (str "async cursor threw: " e))
+                       (done))))))))
 \n
