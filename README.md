@@ -4,7 +4,10 @@
 in-memory 4-covering-index Arrangement (`:eavt`/`:aevt`/`:avet`/`:vaet`, named
 for their sort orders): CID-addressed commit snapshotting via
 `kotoba-lang/prolly-tree`, blinded/encrypted leaves, incremental commits,
-partitioned roots, and cursor reads over the persisted trees.
+partitioned roots, and cursor reads over the persisted trees. ClojureScript
+callers can hand `cursor-async` directly to `arrangement.datalog/q-async`;
+multi-clause Datalog then remains Promise-native across persisted tree reads
+without hydrating the snapshot.
 
 ### Two vocabularies, on purpose
 

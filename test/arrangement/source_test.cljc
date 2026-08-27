@@ -301,11 +301,18 @@
                       (as/cursor-async get-async snapshot-cid
                                        test-blind-fn test-decrypt-fn)))
              (.then (fn [cursor]
-                      (as/scan-async cursor [nil "kind" nil])))
+                      (-> (as/scan-async cursor [nil "kind" nil])
+                          (.then (fn [got]
+                                   (is (= #{{:s "s1" :p "kind" :o "rare"}
+                                            {:s "s2" :p "kind" :o "common"}}
+                                          got))
+                                   (ds/scan-range-async cursor "kind" "a" "z"))))))
              (.then (fn [got]
                       (is (= #{{:s "s1" :p "kind" :o "rare"}
                                {:s "s2" :p "kind" :o "common"}}
                              got))
+                      (is (set? got)
+                          "the async range protocol returns quads, not its report map")
                       (is (< (count (set @reads)) (count @blocks))
                           "the Promise cursor does not hydrate every index")
                       (done)))

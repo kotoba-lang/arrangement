@@ -45,3 +45,25 @@
   clause grammar, the aggregate forms, and the `:clause-cardinality` hint."
   ([db query visible?] (dc/q db query visible?))
   ([db query visible? inputs] (dc/q db query visible? inputs)))
+
+(defn normalize
+  "Alpha-normalize a query without changing clause order. Delegates to
+  `datalog.core/normalize`."
+  [query]
+  (dc/normalize query))
+
+(def orbit-limit dc/orbit-limit)
+
+(defn canonicalize
+  "Canonical query identity across reorderable rules and disjunctions.
+  Delegates to `datalog.core/canonicalize`."
+  [query]
+  (dc/canonicalize query))
+
+#?(:cljs
+   (defn q-async
+     "Promise-returning Datalog over a `datom.source/IAsyncPatternSource`.
+     Delegates mechanically to `datalog.core/q-async`; see that var for the
+     full query contract."
+     ([db query visible?] (dc/q-async db query visible?))
+     ([db query visible? inputs] (dc/q-async db query visible? inputs))))
