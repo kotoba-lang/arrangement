@@ -12,8 +12,8 @@
  ;; the same SHA, so this adds no new transitive dependency.
  :deps {io.github.kotoba-lang/prolly-tree {:git/sha "644753aec57e12c9588786d46751b1503a5fd6f0"}
         io.github.kotoba-lang/io-ipld {:git/sha "f99bf27d58a75bb8cf6ddfd2d57a0aaac9c824ac"}
-        io.github.kotoba-lang/datom-source {:git/sha "3a99b1b1fb2d2f8736995076eb1ab5f94f0808b7"}
-        io.github.kotoba-lang/datalog {:git/sha "a43dc1cf72ce6abd8969e206c3b1efe89bb0500c"}}
+        io.github.kotoba-lang/datom-source {:git/sha "19dc98ad5272da6648c27eada8e1ed76cac85d8d"}
+        io.github.kotoba-lang/datalog {:git/sha "1a1ef583344a1ed72b82ffbda015aa14af6d682c"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

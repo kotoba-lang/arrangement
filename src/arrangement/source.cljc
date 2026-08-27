@@ -160,8 +160,17 @@
 
 #?(:cljs
    (do
+     (declare scan-async scan-range-report-async)
+
      (defrecord ^:no-doc AsyncCursorSource
-         [get-fn roots blind-fn decrypt-fn partitions])
+         [get-fn roots blind-fn decrypt-fn partitions]
+       ds/IAsyncPatternSource
+       (-scan-async [this pattern]
+         (scan-async this pattern))
+       ds/IAsyncRangeSource
+       (-scan-range-async [this attr lo hi opts]
+         (-> (scan-range-report-async this attr lo hi opts)
+             (.then (fn [report] (:quads report))))))
 
      (defn snapshot-roots-async
        "Promise-returning counterpart to `snapshot-roots` for Worker/R2/HTTP

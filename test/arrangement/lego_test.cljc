@@ -4,7 +4,7 @@
   Every assertion here runs the SAME question through different compositions
   and requires the same answer. A seam that is only exercised by one
   implementation is a layer of indirection, not a seam."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is testing #?(:cljs async)]]
             [datom.source :as ds]
             [datom.source.conformance :as conf]
             [arrangement.core :as arr]
@@ -37,6 +37,29 @@
 
 (def two-clause-join
   '{:find [?a ?b] :where [[?a "knows" ?b] [?b "city" "tokyo"]]})
+
+#?(:cljs
+   (deftest datalog-joins-over-the-worker-native-cursor
+     (async done
+       (let [blocks (atom {})
+             put! (fn [cid bytes]
+                    (swap! blocks assoc cid bytes)
+                    (js/Promise.resolve cid))
+             get! #(js/Promise.resolve (get @blocks %))]
+         (-> (arr/commit! put! (db-of social) nil arr/current-schema-version
+                          #(js/Promise.resolve (test-blind-fn %))
+                          #(js/Promise.resolve (test-encrypt-fn %)))
+             (.then #(as/cursor-async
+                      get! %
+                      (fn [x] (js/Promise.resolve (test-blind-fn x)))
+                      (fn [x] (js/Promise.resolve (test-decrypt-fn x)))))
+             (.then #(dl/q-async % two-clause-join yes))
+             (.then (fn [answer]
+                      (is (= #{["alice" "bob"]} answer))
+                      (done)))
+             (.catch (fn [e]
+                       (is false (str "async Datalog threw: " e))
+                       (done))))))))
 
 #?(:clj
    (deftest datalog-answers-the-same-over-db-source-and-cursor
