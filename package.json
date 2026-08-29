@@ -5,9 +5,7 @@
     "test:cljs": "nbb gen-shadow-cljs-edn.cljs && shadow-cljs compile test && node out/test.js",
     "test:nbb": "bb run-nbb-tests.bb"
   },
-  "dependencies": {
-    "@noble/hashes": "^1.4.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "nbb": "^1.4.208",
     "shadow-cljs": "^2.28.0"

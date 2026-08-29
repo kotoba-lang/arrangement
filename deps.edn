@@ -10,7 +10,10 @@
  ;; something to notice -- it is something that cannot happen.
  ;; `datalog` pulls in only `datom-source`, which is already pinned below to
  ;; the same SHA, so this adds no new transitive dependency.
- :deps {io.github.kotoba-lang/prolly-tree {:git/sha "644753aec57e12c9588786d46751b1503a5fd6f0"}
+ :deps {io.github.kotoba-lang/io-multiformats
+        {:git/url "https://github.com/kotoba-lang/io-multiformats.git"
+         :git/sha "561fe7dfada3db852b127f06d41750dabd3cead9"}
+        io.github.kotoba-lang/prolly-tree {:git/sha "644753aec57e12c9588786d46751b1503a5fd6f0"}
         io.github.kotoba-lang/io-ipld {:git/sha "f99bf27d58a75bb8cf6ddfd2d57a0aaac9c824ac"}
         io.github.kotoba-lang/datom-source {:git/sha "19dc98ad5272da6648c27eada8e1ed76cac85d8d"}
         io.github.kotoba-lang/datalog {:git/sha "d18513af533917539c56435de6fb1426738da31a"}}
