@@ -16,10 +16,12 @@
 
   **Query reach is deliberately preserved.** `restore-all` hydrates every
   partition and merges them into one db, so a reader still sees a single
-  joinable plane — the property ADR-260726 exists to protect (\"一緒にクエリ
-  したいものは同じ ref に置く\"). This is the difference between partitioning
-  and sharding: a shard splits what you can ask, a partition splits only who
-  may write. Filecoin's state tree has the same shape (each actor's state is
+  joinable plane. That merge is the whole guarantee. Reach follows
+  composition, not the number of refs: root ADR-2809040800 supersedes
+  ADR-260726's \"exactly one ref\", which was the ceiling of the day and not a
+  property of the model. This is the difference between partitioning and
+  sharding: a shard splits what you can ask *because nothing composes it back*,
+  a partition splits only who may write. Filecoin's state tree has the same shape (each actor's state is
   its own IPLD subtree hanging off one root) but pays the other half of the
   price — its actors cannot be queried across, only walked.
 
@@ -142,8 +144,11 @@
   "Hydrate every partition under `root-cid` and merge them into ONE db.
 
   This is the function that keeps the design honest. If it did not exist —
-  if callers queried partitions separately — this would be sharding, and the
-  join reach ADR-260726 protects would be gone. Returns a db on clj and a
+  if callers queried partitions separately — this would be sharding. A split
+  is not what costs the reach; failing to compose it is (root
+  ADR-2809040800). `kotoba-lang/datom-source`'s `merged` is the same move one
+  layer down, for a caller that cannot afford to hydrate everything first.
+  Returns a db on clj and a
   Promise of one on cljs, matching `arrangement.core/restore`."
   [get-fn root-cid decrypt-fn]
   (let [cids (vals (:partitions (read-root get-fn root-cid)))]
