@@ -42,8 +42,4 @@
   :read-bench {:extra-paths ["test"]
                :extra-deps {io.github.cognitect-labs/test-runner
                             {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-               :main-opts ["-m" "arrangement.read-scaling-bench"]}
-       ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
-       :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
-         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
-                     "--fail-level" "error"]}}}
+               :main-opts ["-m" "arrangement.read-scaling-bench"]}}}
