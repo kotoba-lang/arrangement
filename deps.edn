@@ -10,7 +10,12 @@
  ;; something to notice -- it is something that cannot happen.
  ;; `datalog` pulls in only `datom-source`, which is already pinned below to
  ;; the same SHA, so this adds no new transitive dependency.
- :deps {io.github.kotoba-lang/io-multiformats
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/io-multiformats
         {:git/url "https://github.com/kotoba-lang/io-multiformats.git"
          :git/sha "561fe7dfada3db852b127f06d41750dabd3cead9"}
         io.github.kotoba-lang/prolly-tree {:git/sha "644753aec57e12c9588786d46751b1503a5fd6f0"}
