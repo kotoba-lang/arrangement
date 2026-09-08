@@ -1,7 +1,7 @@
 (ns arrangement.core-test
   (:require [clojure.test :refer [deftest is testing]]
             #?(:cljs [cljs.test :refer [async]])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
             [arrangement.core :as qs]
             [multiformats.core :as mf]

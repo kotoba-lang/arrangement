@@ -36,7 +36,7 @@
   is silent — the row count is right and the fields are transposed — which is
   why the conformance suite has cases where s, p and o are drawn from
   overlapping value sets."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [datom.source :as ds]
             [arrangement.core :as arr]
             [arrangement.query :as q]
