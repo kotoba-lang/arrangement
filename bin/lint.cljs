@@ -61,7 +61,7 @@
 ;; ADR-2608136000. 97 rather than 2 because clj-kondo already uses 0/2/3 for
 ;; clean/warnings/errors and 1 for its own internal failure.
 
-(require '[clojure.string :as str])
+(require '[kotoba.lang.text :as str])
 
 (def fs     (js/require "node:fs"))
 (def os     (js/require "node:os"))
