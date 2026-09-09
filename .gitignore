@@ -6,3 +6,6 @@ out/
 .shadow-cljs/
 package-lock.json
 shadow-cljs.edn
+
+# nbb dependency cache -- a build artifact, not source
+.nbb/
