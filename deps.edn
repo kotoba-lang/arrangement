@@ -25,14 +25,14 @@
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
-                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
   ;; Writer-contention benchmark (single-lane CAS vs partitioned root).
   ;;   clojure -M:bench [writers] [writes-per-writer]
   :bench {:extra-paths ["test"]
           :extra-deps {io.github.cognitect-labs/test-runner
-                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                       {:git/tag "v0.5.1" :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}}
           :main-opts ["-m" "arrangement.writer-contention-bench"]}
   ;; Read-scaling benchmark (cost of merge-on-read vs partition count).
   ;;   clojure -M:read-bench [total-facts] [queries] [k...]
@@ -42,9 +42,9 @@
                 :extra-deps {io.github.kotoba-lang/block-cache
                              {:git/sha "461f9c472480b49f09c5665fc9ee244e7def121e"}
                              io.github.cognitect-labs/test-runner
-                             {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                             {:git/tag "v0.5.1" :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}}
                 :main-opts ["-m" "arrangement.cache-stack-bench"]}
   :read-bench {:extra-paths ["test"]
                :extra-deps {io.github.cognitect-labs/test-runner
-                            {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                            {:git/tag "v0.5.1" :git/sha "dfb30dd6605cb6c0efc275e1df1736f6e90d4d73"}}
                :main-opts ["-m" "arrangement.read-scaling-bench"]}}}
