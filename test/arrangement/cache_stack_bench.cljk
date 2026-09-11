@@ -17,7 +17,7 @@
   slower than baseline, which is what measuring an optimisation against a
   cost that is not there looks like.
 
-    clojure -M:cache-bench
+    kbb -M:cache-bench
   "
   (:require [arrangement.core :as arr]
 [arrangement.datalog :as dl]

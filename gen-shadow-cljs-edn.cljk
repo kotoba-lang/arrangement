@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; nbb port of gen-shadow-cljs-edn.bb (ADR-2607173000).
 (require '[kotoba.lang.text :as str])
 (def fs (js/require "node:fs"))
@@ -6,7 +6,7 @@
 (defn sh [& args]
   (let [r (.spawnSync cp (first args) (to-array (rest args)) #js {:encoding "utf8"})]
     {:exit (or (.-status r) 1) :out (or (.-stdout r) "") :err (or (.-stderr r) "")}))
-(let [r (sh "clojure" "-Spath")
+(let [r (sh "kbb" "-Spath")
       cp-str (str/trim (or (:out r) ""))
       dirs (->> (str/split cp-str #":")
                 (remove str/blank?)
@@ -17,4 +17,4 @@
          " {:test {:target :node-test\n"
          "         :output-to \"out/test.js\"\n"
          "         :ns-regexp \"-test$\"}}}\n"))
-  (println "wrote shadow-cljs.edn with" (count dirs) "source dirs from clojure -Spath"))
+  (println "wrote shadow-cljs.edn with" (count dirs) "source dirs from kbb -Spath"))

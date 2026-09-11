@@ -2,7 +2,7 @@
   "name": "arrangement",
   "private": true,
   "scripts": {
-    "test:cljs": "nbb gen-shadow-cljs-edn.cljk && shadow-cljs compile test && node out/test.js",
+    "test:cljs": "kbb --backend sci gen-shadow-cljs-edn.cljk && amu compile --target wasm32-browser test && node out/test.js",
     "test:nbb": "bb run-nbb-tests.bb"
   },
   "dependencies": {},

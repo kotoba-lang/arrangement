@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; bin/lint.cljk -- clj-kondo, without a JVM.
 ;;
 ;; ## What this replaces
@@ -9,7 +9,7 @@
 ;;          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
 ;;                      "--fail-level" "error"]}
 ;;
-;; run as `clojure -M:lint`. clj-kondo is not a JVM library here -- it is a
+;; run as `kbb -M:lint`. clj-kondo is not a JVM library here -- it is a
 ;; tool, and it ships a GraalVM native image for every platform this
 ;; workspace runs on. The alias was a delivery mechanism, not a dependency.
 ;; CLAUDE.md fixes the runtime order with the JVM demoted to last resort;
@@ -18,7 +18,7 @@
 ;;
 ;; The lint itself is unchanged: same tool, same VERSION, same paths, same
 ;; --fail-level, therefore the same findings. Verified before landing by
-;; running `clojure -M:lint` and this script on the same tree and diffing
+;; running `kbb -M:lint` and this script on the same tree and diffing
 ;; the finding lines.
 ;;
 ;; ## Why not the npm package

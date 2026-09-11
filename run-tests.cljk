@@ -10,7 +10,7 @@
   JVM and red under nbb for reasons production does not have (SCI deftype
   behaviour), so `.cljc` alone is not grounds.
 
-      npx nbb --classpath src:test run-tests.cljk"
+      kbb --backend sci --classpath src:test run-tests.cljk"
   (:require [cljs.test :as t]
             [arrangement.commit-delta-test]
             [arrangement.core-test]

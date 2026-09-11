@@ -1,10 +1,10 @@
-#!/usr/bin/env bb
+#!/usr/bin/env kbb
 ;; Runs this repo's test suite through nbb (Node Babashka -- a SCI-interpreted
 ;; ClojureScript environment, no build step) as a genuine 3rd platform tier
-;; alongside JVM (`clojure -M:test`) and self-hosted cljs (`npm run
+;; alongside JVM (`kbb -M:test`) and self-hosted cljs (`npm run
 ;; test:cljs`). Auto-discovers every `*_test.cljc` under test/ (same
 ;; -test$-suffix convention shadow-cljs.edn's `:ns-regexp "-test$"` already
-;; assumes) and resolves the classpath from `clojure -Spath`, filtered to
+;; assumes) and resolves the classpath from `kbb -Spath`, filtered to
 ;; directories only (jars are JVM-only; nbb can't load them) -- the same
 ;; approach gen-shadow-cljs-edn.bb already uses for the cljs build, so nbb
 ;; tests against the exact pinned deps.edn dependencies too, not a
@@ -22,7 +22,7 @@
          '[clojure.string :as str])
 
 (defn- classpath []
-  (let [cp (-> (sh "clojure" "-Spath") :out str/trim)]
+  (let [cp (-> (sh "kbb" "-Spath") :out str/trim)]
     (->> (str/split cp #":")
          (remove str/blank?)
          (filter #(.isDirectory (java.io.File. %)))
@@ -60,7 +60,7 @@
       (spit (str "out/" entry-file) entry)
       (println "nbb classpath:" (classpath))
       (println "test namespaces:" nss)
-      (let [{:keys [exit]} @(p/process ["npx" "nbb" "-cp" (str (classpath) ":out") (str "out/" entry-file)]
+      (let [{:keys [exit]} @(p/process ["npx" "kbb" "--backend" "sci" "-cp" (str (classpath) ":out") (str "out/" entry-file)]
                                         {:inherit true})]
         (System/exit exit)))))
 
