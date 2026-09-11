@@ -1,5 +1,5 @@
 #!/usr/bin/env nbb
-;; bin/lint.cljs -- clj-kondo, without a JVM.
+;; bin/lint.cljk -- clj-kondo, without a JVM.
 ;;
 ;; ## What this replaces
 ;;
@@ -145,7 +145,7 @@
                     " -- install clj-kondo " version " and put it on PATH")))
     (let [url (str "https://github.com/clj-kondo/clj-kondo/releases/download/v"
                    version "/clj-kondo-" version "-" asset ".zip")]
-      (println (str "bin/lint.cljs: fetching clj-kondo " version " for " key))
+      (println (str "bin/lint.cljk: fetching clj-kondo " version " for " key))
       (-> (js/fetch url)
           (.then (fn [resp]
                    (when-not (.-ok resp)
@@ -169,7 +169,7 @@
 
 (defn run! [bin]
   (let [args (concat ["--lint"] lint-paths ["--fail-level" fail-level])]
-    (println (str "bin/lint.cljs: " (reported-version bin) " (" bin ")"))
+    (println (str "bin/lint.cljk: " (reported-version bin) " (" bin ")"))
     (let [r (.spawnSync cp bin (clj->js args) #js {:stdio "inherit"})]
       (when (.-error r)
         (refuse! (str "could not execute " bin ": " (.-message (.-error r)))))
@@ -190,7 +190,7 @@
       (do
         (when-let [other (first (filter exec-runs? candidates))]
           (binding [*print-fn* *print-err-fn*]
-            (println (str "bin/lint.cljs: ignoring " (reported-version other)
+            (println (str "bin/lint.cljk: ignoring " (reported-version other)
                           " at " other " -- this repository pins " version))))
         (-> (js/Promise.resolve (fetch-into-cache!))
             (.then (fn [bin]
