@@ -133,7 +133,7 @@ where the code is, in [`kotoba-lang/datalog`](https://github.com/kotoba-lang/dat
 ## Test
 
 ```bash
-clojure -M:test        # JVM
+kbb -M:test        # JVM
 npm run test:cljs       # real shadow-cljs (not nbb -- see this org's own
                         # verification discipline, ADR-2607022600 add.3)
 ```
