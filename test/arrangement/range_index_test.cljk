@@ -4,7 +4,7 @@
   `prolly-tree.diff` was wrong three times over, undetected by sixty
   pseudo-random windows (superproject ADR-2608170400 P4-3). So the boundary
   cases here are enumerated rather than sampled."
-  (:require #?(:clj [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [arrangement.range-index :as ri]))
 

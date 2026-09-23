@@ -2,7 +2,7 @@
   "Both sources must answer identically, and the shared conformance suite is
   what says so. JVM-only for the same reason the commit/restore tests are:
   the crypto fixtures are synchronous only on clj."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             #?(:cljs [cljs.test :refer [async]])
             [datom.source :as ds]
             [datom.source.conformance :as conf]

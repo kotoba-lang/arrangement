@@ -14,7 +14,7 @@
   ClojureScript coverage is the single async test at the bottom, which exists
   because the cljs path was broken outright and nothing here would have said
   so. Mirroring all five asynchronously is OWED — see that test's comment."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             #?(:cljs [cljs.test :refer [async]])
             [arrangement.core :as a]))
 

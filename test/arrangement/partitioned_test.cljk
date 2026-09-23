@@ -13,7 +13,7 @@
   are: `commit!`/`restore` are synchronous on clj and Promise-based on cljs,
   and the crypto fixtures follow. `restore-all`'s cljs branch is therefore NOT
   exercised here."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [arrangement.core :as arr]
             [arrangement.partitioned :as part]
             [arrangement.core-test :refer [test-blind-fn test-encrypt-fn test-decrypt-fn]]

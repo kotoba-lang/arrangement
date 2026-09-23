@@ -4,7 +4,7 @@
   Every assertion here runs the SAME question through different compositions
   and requires the same answer. A seam that is only exercised by one
   implementation is a layer of indirection, not a seam."
-  (:require [clojure.test :refer [deftest is testing #?(:cljs async)]]
+  (:require [kotoba.test :refer [deftest is testing #?(:cljs async)]]
             [datom.source :as ds]
             [datom.source.conformance :as conf]
             [arrangement.core :as arr]
