@@ -26,7 +26,7 @@
        reporting the right thing on the JVM;
     5. one end-to-end call through each shim, so \"it compiles\" is not
        mistaken for \"it runs\"."
-  (:require #?(:clj [clojure.test :refer [deftest testing is]]
+  (:require #?(:clj [kotoba.test :refer [deftest testing is]]
                :cljs [cljs.test :refer-macros [deftest testing is]])
             [arrangement.core :as arr]
             [arrangement.query :as q]
