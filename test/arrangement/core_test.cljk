@@ -624,7 +624,38 @@
          (is (= :arrangement/component-not-blindable (commit-with (v/float64 1.5)))))
        (testing "scalars and Links are admitted"
          (doseq [o [nil true 42 "admin" :admin 'admin bafy-link]]
-           (is (nil? (commit-with o)) (str "should be blindable: " (pr-str o))))))))
+           (is (nil? (commit-with o)) (str "should be blindable: " (pr-str o)))))
+       (testing "vectors of blindable components are admitted (bonsai tree entries, commit parents)"
+         (doseq [o [[] [1 "a" :k] [bafy-link bafy-link] [["a.txt" bafy-link "blob"]] [[[]]]]]
+           (is (nil? (commit-with o)) (str "should be blindable: " (pr-str o)))))
+       (testing "a vector is only as blindable as its elements"
+         (is (= :arrangement/component-not-blindable (commit-with [1 #{2}])))
+         (is (= :arrangement/component-not-blindable (commit-with [[{:a 1}]])))
+         (is (= :arrangement/component-not-blindable (commit-with [(byte-array [1])]))))
+       (testing "lists and other sequentials are still rejected"
+         (is (= :arrangement/component-not-blindable (commit-with '(1 2))))
+         (is (= :arrangement/component-not-blindable (commit-with (seq [1 2]))))))))
+
+(deftest blind-input-keeps-a-link-and-a-literal-pair-apart
+  ;; A Link becomes ["ipld/link" cid]; a literal vector of that same shape must
+  ;; not derive the same key input, or two different datoms would collide.
+  (let [cid (ipld/link-cid bafy-link)]
+    (is (= ["ipld/link" cid] (qs/blind-input bafy-link)))
+    (is (= ["arrangement/vector" [["ipld/link" cid]]] (qs/blind-input [bafy-link])))
+    (is (= ["arrangement/vector" ["ipld/link" cid]] (qs/blind-input ["ipld/link" cid])))
+    (is (not= (qs/blind-input bafy-link) (qs/blind-input ["ipld/link" cid])))
+    (is (= "s" (qs/blind-input "s")) "scalars pass through unchanged")
+    (is (= ["arrangement/vector" [["arrangement/vector" ["a.txt" ["ipld/link" cid] "blob"]]]]
+           (qs/blind-input [["a.txt" bafy-link "blob"]]))
+        "a bonsai tree-entries vector has one canonical key input")
+    (is (= (qs/blind-input [1 "a" :k]) (qs/blind-input [1 "a" :k])))
+    (is (not= (qs/blind-input [1 2]) (qs/blind-input [2 1])) "order is part of the key")
+    (doseq [bad [[1 #{2}] [[{:a 1}]] '(1 2)]]
+      (is (= :arrangement/component-not-blindable
+             (try (qs/blind-input bad) nil
+                  (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
+                    (:problem (ex-data e)))))
+          (str "must be rejected: " (pr-str bad))))))
 
 #?(:cljs
    (deftest restore-rejects-a-schema-version-this-build-does-not-know-cljs
