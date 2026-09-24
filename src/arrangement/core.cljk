@@ -242,19 +242,31 @@
   ;; A Link is admitted by name (it is a `defrecord`, so `map?` is true for it)
   ;; and goes through `link->edn`, which exists for exactly this reason.
   ;;
+  ;; A VECTOR is admitted when every element is: its order is defined and
+  ;; `pr-str` prints it element by element, so it has one canonical form once
+  ;; each element does. bonsai stores a tree's entries and a commit's parents
+  ;; as one vector each; rejecting vectors made every bonsai repo
+  ;; unpersistable. It is wrapped as `["arrangement/vector" [...]]` so that a
+  ;; literal vector `["ipld/link" cid]` and a real Link (which becomes that
+  ;; same pair) derive DIFFERENT key inputs.
+  ;;
   ;; This bounds the KEY path only. The VALUE slot is `kotoba.value.v1` and
   ;; accepts the codec's full admitted set.
-  (when-not (or (nil? component)
-                (boolean? component)
-                (integer? component)
-                (string? component)
-                (keyword? component)
-                (symbol? component)
-                (ipld/link? component))
-    (throw (ex-info "arrangement: component is not a blindable scalar"
-                    {:problem :arrangement/component-not-blindable
-                     :component-type (type component)})))
-  (link->edn component))
+  (letfn [(canonical [c]
+            (cond
+              (or (nil? c) (boolean? c) (integer? c) (string? c)
+                  (keyword? c) (symbol? c))
+              c
+
+              (ipld/link? c) (link->edn c)
+
+              (vector? c) ["arrangement/vector" (mapv canonical c)]
+
+              :else
+              (throw (ex-info "arrangement: component is not a blindable scalar"
+                              {:problem :arrangement/component-not-blindable
+                               :component-type (type c)}))))]
+    (canonical component)))
 
 ;; ── index-root: JVM (sync) / cljs (async, ADR-2607051000 Worker addendum) ──
 ;; `blind-fn`/`encrypt-fn` carry a DIFFERENT contract per platform, by design:
