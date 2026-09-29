@@ -12,7 +12,7 @@
 ;; run as `kbb -M:lint`. clj-kondo is not a JVM library here -- it is a
 ;; tool, and it ships a GraalVM native image for every platform this
 ;; workspace runs on. The alias was a delivery mechanism, not a dependency.
-;; CLAUDE.md fixes the runtime order with the JVM demoted to last resort;
+;; AGENTS.md fixes the runtime order with the JVM demoted to last resort;
 ;; `scripts/verify-jvm-dependency-surface.cljs` classifies this alias as
 ;; `:jvm-lint` and calls it "the cheapest exit in the whole set".
 ;;
@@ -40,7 +40,7 @@
 ;;
 ;; Measured on this machine the same day: `npx --yes clj-kondo@2025.10.23
 ;; --version` prints `10.2.2` -- npx's own version -- and exits 0. npx
-;; consumes the leading `--flag` as its own. CLAUDE.md already records this
+;; consumes the leading `--flag` as its own. AGENTS.md already records this
 ;; breakage. A lint that never ran and exited 0 is the failure mode this
 ;; whole exercise is about.
 ;;
@@ -57,7 +57,7 @@
 ;; ## What it does when it cannot answer
 ;;
 ;; It exits 97 and prints REFUSED. It does not exit 0. "I could not lint"
-;; and "I linted and it was clean" must not be the same value -- CLAUDE.md
+;; and "I linted and it was clean" must not be the same value -- AGENTS.md
 ;; ADR-2608136000. 97 rather than 2 because clj-kondo already uses 0/2/3 for
 ;; clean/warnings/errors and 1 for its own internal failure.
 
